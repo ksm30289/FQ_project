@@ -1,19 +1,18 @@
 import re
 from datetime import datetime
-from pathlib import Path
-from typing import List, Dict, Optional
+from typing import Dict, List, Optional
 
-from config import DEFAULT_ROOM_NAME
+from config import DEFAULT_ROOM_NAME, IGNORE_SYSTEM_MESSAGES
 
-# 예시 형식:
-# 2026년 4월 6일 오전 10:12, 닉네임 : 메시지
 LINE_PATTERN = re.compile(
     r"^(?P<date>\d{4}년 \d{1,2}월 \d{1,2}일)\s(?P<ampm>오전|오후)\s(?P<time>\d{1,2}:\d{2}),\s(?P<user>.+?)\s:\s(?P<message>.*)$"
 )
 
-DATE_HEADER_PATTERN = re.compile(
-    r"^\d{4}년 \d{1,2}월 \d{1,2}일"
-)
+SYSTEM_PATTERNS = [
+    re.compile(r"^.+님이 들어왔습니다\.$"),
+    re.compile(r"^.+님이 나갔습니다\.$"),
+    re.compile(r"^.+님을 내보냈습니다\.$"),
+]
 
 
 def parse_kakao_datetime(date_str: str, ampm: str, time_str: str) -> datetime:
@@ -36,26 +35,27 @@ def parse_kakao_datetime(date_str: str, ampm: str, time_str: str) -> datetime:
     )
 
 
-def infer_room_name(file_path: Path) -> str:
-    # 파일명으로 기본 방 이름 추정
-    return file_path.stem or DEFAULT_ROOM_NAME
+def is_system_message(message: str) -> bool:
+    return any(p.match(message.strip()) for p in SYSTEM_PATTERNS)
 
 
-def parse_chat_text(text: str, source_file: str, room_name: Optional[str] = None) -> List[Dict]:
+def parse_chat_text(
+    text: str,
+    source_file: str,
+    room_name: Optional[str] = None,
+) -> List[Dict]:
     room = room_name or DEFAULT_ROOM_NAME
-    lines = text.splitlines()
-
     rows: List[Dict] = []
     current = None
 
-    for raw_line in lines:
+    for raw_line in text.splitlines():
         line = raw_line.rstrip()
 
-        # 완전 빈 줄도 메시지 줄바꿈으로 취급 가능
         match = LINE_PATTERN.match(line)
         if match:
             if current:
-                rows.append(current)
+                if not (IGNORE_SYSTEM_MESSAGES and is_system_message(current["message"])):
+                    rows.append(current)
 
             dt = parse_kakao_datetime(
                 match.group("date"),
@@ -74,23 +74,13 @@ def parse_chat_text(text: str, source_file: str, room_name: Optional[str] = None
                 "raw_line": line,
             }
         else:
-            # 날짜 구분 헤더/시스템 문구는 필요시 무시
-            # 멀티라인 메시지면 이전 메시지에 이어붙임
             if current is not None:
                 extra = line.strip()
                 if extra:
                     current["message"] += "\n" + extra
 
     if current:
-        rows.append(current)
+        if not (IGNORE_SYSTEM_MESSAGES and is_system_message(current["message"])):
+            rows.append(current)
 
     return rows
-
-
-def parse_chat_file(file_path: Path, text: str) -> List[Dict]:
-    room_name = infer_room_name(file_path)
-    return parse_chat_text(
-        text=text,
-        source_file=file_path.name,
-        room_name=room_name,
-    )
