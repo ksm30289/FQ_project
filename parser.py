@@ -171,12 +171,18 @@ def parse_chat_text(
                 msg_match.group("hour"),
                 msg_match.group("minute"),
             )
+            
+            user_name = msg_match.group("user").strip()
 
+            if user_name == "오픈채팅봇":
+                current = None
+                 continue
+            
             current = build_message_row(
                 room_name=room,
                 source_file=source_file,
                 dt=dt,
-                user_name=msg_match.group("user"),
+                user_name=user_name,
                 message=msg_match.group("message"),
                 raw_line=stripped,
             )
