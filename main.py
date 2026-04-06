@@ -43,6 +43,7 @@ def main():
 
         try:
             text = drive_client.download_text_file(file_id)
+
             parsed_rows = parse_chat_text(
                 text=text,
                 source_file=file_name,
@@ -50,6 +51,11 @@ def main():
             )
 
             print(f"[DEBUG] 파싱 결과: {file_name} -> {len(parsed_rows)}행")
+            print(f"[DEBUG] 첫 3행 샘플: {parsed_rows[:3]}")
+
+            if len(parsed_rows) == 0:
+                print("[DEBUG] 파싱 실패 - 원본 일부 출력:")
+                print(text[:500])
 
             new_rows = []
             for row in parsed_rows:
