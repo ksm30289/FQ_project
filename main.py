@@ -1,4 +1,3 @@
-# main.py
 from config import FILE_DEDUP_MODE, MAX_FILES_PER_RUN
 from drive_client import GoogleDriveClient
 from parser import parse_chat_text
@@ -15,6 +14,7 @@ TREND_SHEETS = ["negative_trend", "positive_trend", "suggestions"]
 
 def read_txt_file_flexible(drive_client, file_id: str) -> str:
     method_candidates = [
+        "download_text_file",
         "download_txt_file",
         "read_txt_file",
         "get_file_text",
@@ -37,7 +37,7 @@ def read_txt_file_flexible(drive_client, file_id: str) -> str:
 
     raise AttributeError(
         "GoogleDriveClient에서 txt 본문을 읽는 메서드를 찾지 못했습니다. "
-        "download_txt_file / read_txt_file / get_file_text 중 하나로 맞춰주세요."
+        "download_text_file / download_txt_file / read_txt_file / get_file_text 중 하나로 맞춰주세요."
     )
 
 
@@ -137,7 +137,6 @@ def main():
             if not row_hash:
                 continue
 
-            # raw_chat 중복 방지
             if row_hash in existing_row_hashes:
                 continue
 
@@ -145,13 +144,11 @@ def main():
             existing_row_hashes.add(row_hash)
             file_uploaded_count += 1
 
-            # 분류
             classified = classify_message(row.get("message", ""))
 
             for sheet_name, keywords in classified.items():
                 categorized_rows[sheet_name].append(make_trend_row(row, keywords))
 
-        # 배치 업로드
         try:
             if raw_rows_to_upload:
                 sheet_client.append_rows(RAW_CHAT_SHEET, raw_rows_to_upload)
@@ -162,6 +159,12 @@ def main():
 
             processed_file_keys_to_append.append(file_key)
             processed_file_keys.add(file_key)
+
+            # 처리 후 폴더 이동
+            try:
+                drive_client.move_to_processed(file_id)
+            except Exception as e:
+                print(f"[WARN] 처리완료 폴더 이동 실패: {file_name} / {e}")
 
             total_files += 1
             total_rows += len(parsed_rows)
