@@ -71,7 +71,15 @@ def main():
     existing_row_hashes = sheet_client.get_existing_row_hashes(RAW_CHAT_SHEET)
     processed_file_keys = sheet_client.get_processed_file_keys(PROCESSED_FILES_SHEET)
 
+    print("[STEP] Drive 파일 조회 시작")
+
+    try:
     files = drive_client.list_txt_files(limit=MAX_FILES_PER_RUN)
+    print("[STEP] Drive 파일 조회 완료")
+    print(f"[DEBUG] Drive 파일 수: {len(files)}")
+    except Exception as e:
+    print(f"[ERROR] Drive 파일 조회 실패: {e}")
+    raise
 
     print(f"[DEBUG] Drive에서 찾은 파일 수: {len(files)}")
     for f in files:
