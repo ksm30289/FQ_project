@@ -159,6 +159,7 @@ def parse_chat_text(
 
         msg_match = MESSAGE_PATTERN.match(stripped)
         if msg_match:
+            # 기존 메시지 flush
             if current is not None:
                 if not (IGNORE_SYSTEM_MESSAGES and current.get("is_system")):
                     rows.append(current)
@@ -171,13 +172,14 @@ def parse_chat_text(
                 msg_match.group("hour"),
                 msg_match.group("minute"),
             )
-            
+
             user_name = msg_match.group("user").strip()
 
-            if user_name == "오픈채팅봇":
+            # 오픈채팅봇 제외
+            if "오픈채팅봇" in user_name:
                 current = None
-                 continue
-            
+                continue
+
             current = build_message_row(
                 room_name=room,
                 source_file=source_file,
@@ -213,10 +215,8 @@ def parse_chat_text(
             continue
 
         # 멀티라인 메시지 처리
-        # 직전 메시지가 있고, 현재 줄이 새 타임스탬프 시작이 아니면 이어붙임
-        if current is not None:
-            if stripped:
-                current["message"] += "\n" + stripped
+        if current is not None and stripped:
+            current["message"] += "\n" + stripped
 
     if current is not None:
         if not (IGNORE_SYSTEM_MESSAGES and current.get("is_system")):
