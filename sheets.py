@@ -1,24 +1,15 @@
+# sheets.py
+import os
 import gspread
 from google.oauth2.service_account import Credentials
-from config import SPREADSHEET_ID
 
-from config import (
-    DEDUP_WORKSHEET_NAME,
-    FILE_DEDUP_MODE,
-    FILE_DEDUP_WORKSHEET_NAME,
-    SPREADSHEET_ID,
-    WORKSHEET_NAME,
-    WRITE_HEADER_IF_EMPTY,
-    get_google_credentials_dict,
-)
-from utils import chunked
+from trend_classifier import make_trend_key_from_row_values
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
 
-HEADERS = [
+RAW_CHAT_SHEET = "raw_chat"
+PROCESSED_FILES_SHEET = "processed_files"
+
+RAW_HEADERS = [
     "room_name",
     "source_file",
     "datetime",
@@ -29,86 +20,118 @@ HEADERS = [
     "row_hash",
 ]
 
-FILE_HEADERS = [
-    "file_key",
-    "file_id",
-    "file_name",
-    "file_size",
-]
-
 
 class GoogleSheetClient:
     def __init__(self):
-        creds = Credentials.from_service_account_info(
-            get_google_credentials_dict(),
-            scopes=SCOPES,
-        )
-        self.gc = gspread.authorize(creds)
-        self.spreadsheet = self.gc.open_by_key(SPREADSHEET_ID)
+        credentials_path = os.getenv("GOOGLE_CREDENTIALS")
+        spreadsheet_id = os.getenv("GOOGLE_SHEETS_ID")
 
-        self.ws = self._get_or_create_worksheet(WORKSHEET_NAME, rows=2000, cols=20)
-        self.dedup_ws = self._get_or_create_worksheet(DEDUP_WORKSHEET_NAME, rows=2000, cols=5)
-        self.file_ws = self._get_or_create_worksheet(FILE_DEDUP_WORKSHEET_NAME, rows=1000, cols=5)
+        if not credentials_path:
+            raise ValueError("환경변수 GOOGLE_CREDENTIALS 가 없습니다.")
+        if not spreadsheet_id:
+            raise ValueError("환경변수 GOOGLE_SHEETS_ID 가 없습니다.")
 
-        self._ensure_headers()
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
 
-    def _get_or_create_worksheet(self, title: str, rows: int, cols: int):
+        creds = Credentials.from_service_account_file(credentials_path, scopes=scopes)
+        gc = gspread.authorize(creds)
+        self.spreadsheet = gc.open_by_key(spreadsheet_id)
+
+    def get_or_create_worksheet(self, title: str, rows: int = 1000, cols: int = 20):
         try:
             return self.spreadsheet.worksheet(title)
         except gspread.WorksheetNotFound:
-            return self.spreadsheet.add_worksheet(title=title, rows=str(rows), cols=str(cols))
+            return self.spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
 
-    def _ensure_headers(self):
-        if not WRITE_HEADER_IF_EMPTY:
+    def ensure_sheet(self, sheet_name: str, headers: list[str]):
+        ws = self.get_or_create_worksheet(sheet_name, rows=1000, cols=max(len(headers), 10))
+        existing_header = ws.row_values(1)
+
+        if existing_header != headers:
+            ws.clear()
+            ws.append_row(headers, value_input_option="USER_ENTERED")
+
+    def append_rows(self, sheet_name: str, rows: list[list]):
+        if not rows:
             return
 
-        if not self.ws.row_values(1):
-            self.ws.append_row(HEADERS, value_input_option="USER_ENTERED")
+        ws = self.get_or_create_worksheet(sheet_name)
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
 
-        if not self.dedup_ws.row_values(1):
-            self.dedup_ws.append_row(["row_hash"], value_input_option="USER_ENTERED")
+    def get_existing_row_hashes(self, sheet_name: str = RAW_CHAT_SHEET) -> set[str]:
+        ws = self.get_or_create_worksheet(sheet_name)
+        values = ws.get_all_values()
 
-        if not self.file_ws.row_values(1):
-            self.file_ws.append_row(FILE_HEADERS, value_input_option="USER_ENTERED")
+        if not values or len(values) < 2:
+            return set()
 
-    def get_existing_row_hashes(self) -> set[str]:
-        values = self.dedup_ws.col_values(1)
-        return set(values[1:]) if len(values) > 1 else set()
+        header = values[0]
+        if "row_hash" not in header:
+            return set()
 
-    def get_processed_file_keys(self) -> set[str]:
-        values = self.file_ws.col_values(1)
-        return set(values[1:]) if len(values) > 1 else set()
+        hash_idx = header.index("row_hash")
+        result = set()
 
-    def append_chat_rows(self, rows: list[dict]) -> int:
-        if not rows:
-            return 0
+        for row in values[1:]:
+            if len(row) > hash_idx and row[hash_idx].strip():
+                result.add(row[hash_idx].strip())
 
-        chat_values = []
-        hash_values = []
+        return result
 
-        for row in rows:
-            chat_values.append([
-                row["room_name"],
-                row["source_file"],
-                row["datetime"],
-                row["date"],
-                row["time"],
-                row["user_name"],
-                row["message"],
-                row["row_hash"],
-            ])
-            hash_values.append([row["row_hash"]])
+    def get_processed_file_keys(self, sheet_name: str = PROCESSED_FILES_SHEET) -> set[str]:
+        ws = self.get_or_create_worksheet(sheet_name)
+        values = ws.get_all_values()
 
-        for chunk in chunked(chat_values, 500):
-            self.ws.append_rows(chunk, value_input_option="USER_ENTERED")
+        if not values:
+            return set()
 
-        for chunk in chunked(hash_values, 500):
-            self.dedup_ws.append_rows(chunk, value_input_option="USER_ENTERED")
+        # 헤더가 없으면 전부 데이터라고 간주
+        if values[0] and values[0][0] == "file_key":
+            data_rows = values[1:]
+        else:
+            data_rows = values
 
-        return len(rows)
+        result = set()
+        for row in data_rows:
+            if row and row[0].strip():
+                result.add(row[0].strip())
 
-    def mark_file_processed(self, file_key: str, file_id: str, file_name: str, file_size: str):
-        self.file_ws.append_row(
-            [file_key, file_id, file_name, file_size],
-            value_input_option="USER_ENTERED",
-        )
+        return result
+
+    def append_processed_file_keys(self, file_keys: list[str], sheet_name: str = PROCESSED_FILES_SHEET):
+        if not file_keys:
+            return
+
+        ws = self.get_or_create_worksheet(sheet_name)
+        values = ws.get_all_values()
+
+        if not values:
+            ws.append_row(["file_key"], value_input_option="USER_ENTERED")
+        elif values[0] and values[0][0] != "file_key":
+            ws.insert_row(["file_key"], 1)
+
+        rows = [[key] for key in file_keys]
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
+
+    def get_existing_trend_keys(self, sheet_name: str) -> set[str]:
+        ws = self.get_or_create_worksheet(sheet_name)
+        values = ws.get_all_values()
+
+        if not values or len(values) < 2:
+            return set()
+
+        result = set()
+        for row in values[1:]:
+            date = row[0] if len(row) > 0 else ""
+            time = row[1] if len(row) > 1 else ""
+            user_name = row[2] if len(row) > 2 else ""
+            message = row[3] if len(row) > 3 else ""
+
+            if date or time or user_name or message:
+                key = make_trend_key_from_row_values(date, time, user_name, message, sheet_name)
+                result.add(key)
+
+        return result
