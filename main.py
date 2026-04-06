@@ -77,12 +77,6 @@ def main():
     existing_row_hashes = sheet_client.get_existing_row_hashes(RAW_CHAT_SHEET)
     processed_file_keys = sheet_client.get_processed_file_keys(PROCESSED_FILES_SHEET)
 
-    existing_trend_keys = {
-        "negative_trend": sheet_client.get_existing_trend_keys("negative_trend"),
-        "positive_trend": sheet_client.get_existing_trend_keys("positive_trend"),
-        "suggestions": sheet_client.get_existing_trend_keys("suggestions"),
-    }
-
     files = drive_client.list_txt_files(limit=MAX_FILES_PER_RUN)
 
     print(f"[DEBUG] Drive에서 찾은 파일 수: {len(files)}")
@@ -149,9 +143,6 @@ def main():
 
             for sheet_name, keywords in classified.items():
                 trend_key = make_trend_key_from_raw_row(row, sheet_name)
-
-                if trend_key in existing_trend_keys[sheet_name]:
-                    continue
 
                 categorized_rows[sheet_name].append(make_trend_row(row, keywords))
                 existing_trend_keys[sheet_name].add(trend_key)
