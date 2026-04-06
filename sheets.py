@@ -1,5 +1,6 @@
 import gspread
 from google.oauth2.service_account import Credentials
+from config import SPREADSHEET_ID
 
 from config import (
     DEDUP_WORKSHEET_NAME,
@@ -43,7 +44,7 @@ class GoogleSheetClient:
             scopes=SCOPES,
         )
         self.gc = gspread.authorize(creds)
-        self.spreadsheet = self.gc.open(SPREADSHEET_NAME)
+        self.spreadsheet = self.gc.open_by_key(SPREADSHEET_ID)
 
         self.ws = self._get_or_create_worksheet(WORKSHEET_NAME, rows=2000, cols=20)
         self.dedup_ws = self._get_or_create_worksheet(DEDUP_WORKSHEET_NAME, rows=2000, cols=5)
