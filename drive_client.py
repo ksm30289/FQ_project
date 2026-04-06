@@ -64,6 +64,10 @@ class GoogleDriveClient:
 
         raise RuntimeError(f"파일 디코딩 실패: {file_id}")
 
+    # main.py 호환용 alias
+    def read_txt_file(self, file_id: str) -> str:
+        return self.download_text_file(file_id)
+
     def move_to_processed(self, file_id: str):
         if not DRIVE_PROCESSED_FOLDER_ID:
             return
