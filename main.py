@@ -8,18 +8,12 @@ from trend_classifier import (
     TREND_HEADERS,
     classify_message,
     make_trend_row,
-    make_trend_key_from_raw_row,
 )
-
 
 TREND_SHEETS = ["negative_trend", "positive_trend", "suggestions"]
 
 
 def read_txt_file_flexible(drive_client, file_id: str) -> str:
-    """
-    기존 drive_client 구현 메서드명이 다를 수 있어서
-    자주 쓰는 이름들을 순서대로 시도한다.
-    """
     method_candidates = [
         "download_txt_file",
         "read_txt_file",
@@ -142,10 +136,7 @@ def main():
             classified = classify_message(row.get("message", ""))
 
             for sheet_name, keywords in classified.items():
-                trend_key = make_trend_key_from_raw_row(row, sheet_name)
-
                 categorized_rows[sheet_name].append(make_trend_row(row, keywords))
-                existing_trend_keys[sheet_name].add(trend_key)
 
         # 배치 업로드
         try:
@@ -176,7 +167,10 @@ def main():
 
     if processed_file_keys_to_append:
         try:
-            sheet_client.append_processed_file_keys(processed_file_keys_to_append, PROCESSED_FILES_SHEET)
+            sheet_client.append_processed_file_keys(
+                processed_file_keys_to_append,
+                PROCESSED_FILES_SHEET
+            )
         except Exception as e:
             print(f"[ERROR] processed_files 기록 실패: {e}")
 
