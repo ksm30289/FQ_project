@@ -15,6 +15,11 @@ def main():
     processed_file_keys = sheet_client.get_processed_file_keys()
 
     files = drive_client.list_txt_files(limit=MAX_FILES_PER_RUN)
+
+    print(f"[DEBUG] Drive에서 찾은 파일 수: {len(files)}")
+    for f in files:
+        print(f"[DEBUG] 파일: {f['name']} (id={f['id']}, size={f.get('size', '0')})")
+
     if not files:
         print("처리할 txt 파일이 없습니다.")
         return
@@ -44,6 +49,8 @@ def main():
                 room_name=file_name.rsplit(".", 1)[0],
             )
 
+            print(f"[DEBUG] 파싱 결과: {file_name} -> {len(parsed_rows)}행")
+
             new_rows = []
             for row in parsed_rows:
                 row_hash = make_row_hash(
@@ -57,6 +64,8 @@ def main():
                 if row_hash not in existing_row_hashes:
                     existing_row_hashes.add(row_hash)
                     new_rows.append(row)
+
+            print(f"[DEBUG] 신규 업로드 대상 행 수: {len(new_rows)}")
 
             uploaded_count = sheet_client.append_chat_rows(new_rows)
             sheet_client.mark_file_processed(file_key, file_id, file_name, file_size)
