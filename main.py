@@ -74,12 +74,12 @@ def main():
     print("[STEP] Drive 파일 조회 시작")
 
     try:
-    files = drive_client.list_txt_files(limit=MAX_FILES_PER_RUN)
-    print("[STEP] Drive 파일 조회 완료")
-    print(f"[DEBUG] Drive 파일 수: {len(files)}")
+        files = drive_client.list_txt_files(limit=MAX_FILES_PER_RUN)
+        print("[STEP] Drive 파일 조회 완료")
+        print(f"[DEBUG] Drive 파일 수: {len(files)}")
     except Exception as e:
-    print(f"[ERROR] Drive 파일 조회 실패: {e}")
-    raise
+        print(f"[ERROR] Drive 파일 조회 실패: {e}")
+        raise
 
     print(f"[DEBUG] Drive에서 찾은 파일 수: {len(files)}")
     for f in files:
