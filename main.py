@@ -97,7 +97,12 @@ def main():
     for file_meta in files:
         file_id = file_meta["id"]
         file_name = file_meta["name"]
-        file_key = make_file_key(file_meta, mode=FILE_DEDUP_MODE)
+        file_key = make_file_key(
+            file_meta["id"],
+            file_meta["name"],
+            file_meta.get("size", "0"),
+            mode=FILE_DEDUP_MODE
+        )
 
         if file_key in processed_file_keys:
             print(f"[SKIP] 이미 처리한 파일: {file_name}")
