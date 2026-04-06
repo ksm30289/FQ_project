@@ -1,3 +1,4 @@
+import hashlib
 import re
 from datetime import datetime
 from pathlib import Path
@@ -99,6 +100,9 @@ def build_message_row(
     message: str,
     raw_line: str,
 ) -> Dict:
+    base = f"{dt.strftime('%Y-%m-%d %H:%M:%S')}|{user_name}|{message}|{source_file}"
+    row_hash = hashlib.sha1(base.encode("utf-8")).hexdigest()
+
     return {
         "room_name": room_name,
         "source_file": source_file,
@@ -107,6 +111,7 @@ def build_message_row(
         "time": dt.strftime("%H:%M:%S"),
         "user_name": user_name.strip(),
         "message": message.strip(),
+        "row_hash": row_hash,   # 👈 이거 추가
         "raw_line": raw_line,
         "is_system": False,
     }
@@ -119,6 +124,9 @@ def build_system_row(
     message: str,
     raw_line: str,
 ) -> Dict:
+    base = f"{dt.strftime('%Y-%m-%d %H:%M:%S')}|SYSTEM|{message}|{source_file}"
+    row_hash = hashlib.sha1(base.encode("utf-8")).hexdigest()
+
     return {
         "room_name": room_name,
         "source_file": source_file,
@@ -127,6 +135,7 @@ def build_system_row(
         "time": dt.strftime("%H:%M:%S"),
         "user_name": "SYSTEM",
         "message": message.strip(),
+        "row_hash": row_hash,   # 👈 이거 추가
         "raw_line": raw_line,
         "is_system": True,
     }
