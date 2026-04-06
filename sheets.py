@@ -6,7 +6,7 @@ from config import (
     DEDUP_WORKSHEET_NAME,
     FILE_DEDUP_MODE,
     FILE_DEDUP_WORKSHEET_NAME,
-    SPREADSHEET_NAME,
+    SPREADSHEET_ID,
     WORKSHEET_NAME,
     WRITE_HEADER_IF_EMPTY,
     get_google_credentials_dict,
