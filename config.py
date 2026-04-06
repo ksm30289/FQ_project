@@ -23,7 +23,7 @@ def get_google_credentials_dict() -> Dict[str, Any]:
 
 
 # ===== Google Sheets =====
-SPREADSHEET_NAME = _required_env("SPREADSHEET_NAME")
+SPREADSHEET_ID = _required_env("SPREADSHEET_ID")
 WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "raw_chat")
 DEDUP_WORKSHEET_NAME = os.getenv("DEDUP_WORKSHEET_NAME", "_dedupe_keys")
 FILE_DEDUP_WORKSHEET_NAME = os.getenv("FILE_DEDUP_WORKSHEET_NAME", "_processed_files")
