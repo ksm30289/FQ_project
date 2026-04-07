@@ -2,10 +2,6 @@ import json
 import os
 from typing import Any, Dict
 
-OPENAI_API_KEY = _required_env("OPENAI_API_KEY")
-AI_REVIEW_ENABLED = os.getenv("AI_REVIEW_ENABLED", "true").lower() == "true"
-AI_REVIEW_MODEL = os.getenv("AI_REVIEW_MODEL", "gpt-4.1-mini")
-
 def _required_env(name: str) -> str:
     value = os.getenv(name)
     if not value:
@@ -53,3 +49,7 @@ MAX_FILES_PER_RUN = int(os.getenv("MAX_FILES_PER_RUN", "20"))
 # id : Drive file id 기준
 # name_size : 파일명 + 파일크기 기준
 FILE_DEDUP_MODE = os.getenv("FILE_DEDUP_MODE", "id")
+
+OPENAI_API_KEY = _required_env("OPENAI_API_KEY")
+AI_REVIEW_ENABLED = os.getenv("AI_REVIEW_ENABLED", "true").lower() == "true"
+AI_REVIEW_MODEL = os.getenv("AI_REVIEW_MODEL", "gpt-4.1-mini")
