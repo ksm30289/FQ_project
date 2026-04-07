@@ -1,73 +1,120 @@
-from typing import Dict, List
-
-from config import AI_REVIEW_BATCH_SIZE
-from ai_reviewer import classify_message_batch
-
-
-def _chunked(items: List[Dict], size: int):
-    for i in range(0, len(items), size):
-        yield items[i:i + size]
-
-
-def _to_trend_row(raw_row: Dict, reason: str):
-    return [
-        raw_row.get("datetime", ""),
-        raw_row.get("user", ""),
-        raw_row.get("message", ""),
-        raw_row.get("source_file", ""),
-        reason,
-        raw_row.get("row_hash", ""),
-    ]
+from config import (
+    FILE_DEDUP_MODE,
+    MAX_FILES_PER_RUN,
+    ROW_DEDUP_ENABLED,
+    DEBUG_LOG,
+    AI_REVIEW_ENABLED,
+)
+from drive_client import GoogleDriveClient
+from parser import parse_chat_text
+from sheets import GoogleSheetClient
+from utils import make_file_key
+from trend_classifier import classify_and_write_trends
 
 
-def classify_and_write_trends(sheet_client, rows: List[Dict]) -> int:
-    if not rows:
-        print("[CLASSIFIER] 입력 rows 없음")
-        return 0
+def log_debug(message: str):
+    if DEBUG_LOG:
+        print(message)
 
-    batch_size = max(1, AI_REVIEW_BATCH_SIZE)
-    print(f"[CLASSIFIER] 분류 시작: 총 {len(rows)}건 / batch_size={batch_size}")
 
-    negative_rows = []
-    positive_rows = []
-    suggestion_rows = []
+def main():
+    print("=== 작업 시작 ===")
 
-    total_processed = 0
+    drive_client = GoogleDriveClient()
+    sheet_client = GoogleSheetClient()
 
-    for batch_index, batch_rows in enumerate(_chunked(rows, batch_size), start=1):
-        print(f"[CLASSIFIER] 배치 처리 시작: {batch_index} / {len(batch_rows)}건")
-        results = classify_message_batch(batch_rows)
+    if ROW_DEDUP_ENABLED:
+        print("[STEP] 기존 row_hash 조회 시작")
+        existing_row_hashes = sheet_client.get_existing_row_hashes()
+        log_debug(f"[DEBUG] 기존 row_hash 수: {len(existing_row_hashes)}")
+    else:
+        existing_row_hashes = set()
+        print("[STEP] row 중복 제거 비활성화 상태")
 
-        for raw_row, result in zip(batch_rows, results):
-            category = result.get("category", "ignore")
-            reason = result.get("reason", "")
+    print("[STEP] 처리 완료 파일키 조회 시작")
+    processed_file_keys = sheet_client.get_processed_file_keys()
+    log_debug(f"[DEBUG] 처리 완료 파일키 수: {len(processed_file_keys)}")
 
-            if category == "negative":
-                negative_rows.append(_to_trend_row(raw_row, reason))
-            elif category == "positive":
-                positive_rows.append(_to_trend_row(raw_row, reason))
-            elif category == "suggestion":
-                suggestion_rows.append(_to_trend_row(raw_row, reason))
+    print("[STEP] Drive 파일 조회 시작")
+    files = drive_client.list_txt_files(limit=MAX_FILES_PER_RUN)
 
-        total_processed += len(batch_rows)
+    print(f"[INFO] 조회된 txt 파일 수: {len(files)}")
+    if not files:
+        print("[INFO] 처리할 txt 파일이 없습니다.")
+        return
 
-    written = 0
+    total_files = 0
+    total_raw_rows = 0
+    total_classified = 0
 
-    if negative_rows:
-        sheet_client.append_negative_rows(negative_rows)
-        print(f"[CLASSIFIER] negative 저장: {len(negative_rows)}건")
-        written += len(negative_rows)
+    for file_meta in files:
+        file_id = file_meta["id"]
+        file_name = file_meta["name"]
+        file_key = make_file_key(file_meta)
 
-    if positive_rows:
-        sheet_client.append_positive_rows(positive_rows)
-        print(f"[CLASSIFIER] positive 저장: {len(positive_rows)}건")
-        written += len(positive_rows)
+        print(f"\n=== 파일 처리 시작: {file_name} ===")
 
-    if suggestion_rows:
-        sheet_client.append_suggestion_rows(suggestion_rows)
-        print(f"[CLASSIFIER] suggestion 저장: {len(suggestion_rows)}건")
-        written += len(suggestion_rows)
+        if FILE_DEDUP_MODE and file_key in processed_file_keys:
+            print(f"[SKIP] 이미 처리된 파일: {file_name}")
+            continue
 
-    print(f"[CLASSIFIER] 배치 처리 완료: {total_processed}건")
-    print(f"[CLASSIFIER] 최종 저장 건수: {written}건")
-    return written
+        try:
+            text = drive_client.download_txt_file(file_id)
+            print(f"[INFO] 파일 다운로드 완료: {file_name} / {len(text)} chars")
+
+            parsed_rows = parse_chat_text(
+                text=text,
+                source_file=file_name,
+                existing_row_hashes=existing_row_hashes,
+            )
+
+            print(f"[INFO] 파싱 결과 row 수: {len(parsed_rows)}")
+
+            if not parsed_rows:
+                print("[INFO] 신규 raw_chat row 없음")
+                if FILE_DEDUP_MODE:
+                    sheet_client.mark_file_processed(file_key, file_name)
+                    print("[OK] 처리 완료 파일 기록 저장")
+                continue
+
+            # raw_chat 저장
+            sheet_client.append_raw_rows(parsed_rows)
+            print(f"[OK] raw_chat 저장 완료: {len(parsed_rows)}건")
+            total_raw_rows += len(parsed_rows)
+
+            # 이번 런에서 추가된 row_hash도 즉시 반영
+            if ROW_DEDUP_ENABLED:
+                for row in parsed_rows:
+                    row_hash = row.get("row_hash")
+                    if row_hash:
+                        existing_row_hashes.add(row_hash)
+
+            # AI 분류
+            if AI_REVIEW_ENABLED:
+                try:
+                    classified_count = classify_and_write_trends(sheet_client, parsed_rows)
+                    print(f"[OK] AI 분류 저장 완료: {classified_count}건")
+                    total_classified += classified_count
+                except Exception as e:
+                    print(f"[ERROR] AI 분류 단계 실패: {e}")
+            else:
+                print("[INFO] AI_REVIEW_ENABLED=false 이므로 AI 분류 생략")
+
+            # 처리 완료 파일 기록
+            if FILE_DEDUP_MODE:
+                sheet_client.mark_file_processed(file_key, file_name)
+                print("[OK] 처리 완료 파일 기록 저장")
+
+            total_files += 1
+
+        except Exception as e:
+            print(f"[ERROR] 파일 처리 실패 - {file_name}: {e}")
+
+    print("\n=== 작업 종료 ===")
+    print(f"[SUMMARY] 처리 파일 수: {total_files}")
+    print(f"[SUMMARY] raw_chat 저장 row 수: {total_raw_rows}")
+    print(f"[SUMMARY] 분류 저장 row 수: {total_classified}")
+
+
+if __name__ == "__main__":
+    main()
