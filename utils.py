@@ -1,12 +1,33 @@
 import hashlib
 
-
-def make_file_key(file_id: str, file_name: str, modified_time: str = "") -> str:
-    raw = f"{file_id}|{file_name}|{modified_time}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+from config import FILE_DEDUP_MODE
 
 
-def make_row_hash(dt: str, user: str, message: str) -> str:
-    # 긴 메시지도 비교 빠르게 하려고 해시 사용
-    raw = f"{dt}|{user}|{message}"
-    return hashlib.md5(raw.encode("utf-8")).hexdigest()
+def make_row_hash(datetime_str: str, user: str, message: str) -> str:
+    raw = f"{datetime_str}|{user}|{message}".strip()
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def make_file_key(file_meta: dict) -> str:
+    """
+    file_meta 예시:
+    {
+        "id": "...",
+        "name": "...",
+        "size": "1234"
+    }
+    """
+    mode = FILE_DEDUP_MODE
+
+    file_id = str(file_meta.get("id", "")).strip()
+    file_name = str(file_meta.get("name", "")).strip()
+    file_size = str(file_meta.get("size", "")).strip()
+
+    if mode == "id":
+        return file_id
+
+    if mode == "name_size":
+        return f"{file_name}|{file_size}"
+
+    # 기본: file
+    return f"{file_id}|{file_name}|{file_size}"
