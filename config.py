@@ -2,6 +2,9 @@ import json
 import os
 from typing import Any, Dict
 
+OPENAI_API_KEY = _required_env("OPENAI_API_KEY")
+AI_REVIEW_ENABLED = os.getenv("AI_REVIEW_ENABLED", "true").lower() == "true"
+AI_REVIEW_MODEL = os.getenv("AI_REVIEW_MODEL", "gpt-4.1-mini")
 
 def _required_env(name: str) -> str:
     value = os.getenv(name)
