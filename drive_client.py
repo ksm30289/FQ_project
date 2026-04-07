@@ -133,7 +133,6 @@ class GoogleDriveClient:
             meta = self.get_file_metadata(file_id)
             mime_type = meta.get("mimeType")
 
-    # ✅ 추가
     def read_text_file(self, file_id: str, mime_type: Optional[str] = None) -> str:
         return self.download_txt_file(file_id, mime_type)
         
