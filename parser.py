@@ -139,7 +139,7 @@ def parse_chat_text(text: str, source_file_name: str = "") -> List[Dict[str, str
     current_row: Optional[Dict[str, str]] = None
 
     for raw_line in text.splitlines():
-        line = raw_line.strip().lstrip("\ufeff")
+        line = raw_line.strip().lstrip("\ufeff").replace("\u200b", "")
 
         if not line.strip():
             continue
