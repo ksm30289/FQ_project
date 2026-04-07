@@ -1,43 +1,55 @@
+from typing import Dict, List
+
+from config import AI_REVIEW_BATCH_SIZE
 from ai_reviewer import classify_message_batch
 
 
-def classify_and_write_trends(sheet_client, rows):
-    """
-    rows: raw_chat에 저장된 row dict 리스트
-    반환값: 분류 시트에 실제로 저장된 총 건수
-    """
+def _chunked(items: List[Dict], size: int):
+    for i in range(0, len(items), size):
+        yield items[i:i + size]
+
+
+def _to_trend_row(raw_row: Dict, reason: str):
+    return [
+        raw_row.get("datetime", ""),
+        raw_row.get("user", ""),
+        raw_row.get("message", ""),
+        raw_row.get("source_file", ""),
+        reason,
+        raw_row.get("row_hash", ""),
+    ]
+
+
+def classify_and_write_trends(sheet_client, rows: List[Dict]) -> int:
     if not rows:
         print("[CLASSIFIER] 입력 rows 없음")
         return 0
 
-    print(f"[CLASSIFIER] 분류 시작: {len(rows)}건")
+    batch_size = max(1, AI_REVIEW_BATCH_SIZE)
+    print(f"[CLASSIFIER] 분류 시작: 총 {len(rows)}건 / batch_size={batch_size}")
 
     negative_rows = []
     positive_rows = []
     suggestion_rows = []
 
-    results = classify_message_batch(rows)
-    print(f"[CLASSIFIER] AI 결과 수: {len(results)}")
+    total_processed = 0
 
-    for row, result in zip(rows, results):
-        category = (result.get("category") or "").strip().lower()
-        reason = (result.get("reason") or "").strip()
+    for batch_index, batch_rows in enumerate(_chunked(rows, batch_size), start=1):
+        print(f"[CLASSIFIER] 배치 처리 시작: {batch_index} / {len(batch_rows)}건")
+        results = classify_message_batch(batch_rows)
 
-        output_row = [
-            row.get("date", ""),
-            row.get("time", ""),
-            row.get("user", ""),
-            row.get("message", ""),
-            row.get("source_file", ""),
-            reason,
-        ]
+        for raw_row, result in zip(batch_rows, results):
+            category = result.get("category", "ignore")
+            reason = result.get("reason", "")
 
-        if category == "negative":
-            negative_rows.append(output_row)
-        elif category == "positive":
-            positive_rows.append(output_row)
-        elif category == "suggestion":
-            suggestion_rows.append(output_row)
+            if category == "negative":
+                negative_rows.append(_to_trend_row(raw_row, reason))
+            elif category == "positive":
+                positive_rows.append(_to_trend_row(raw_row, reason))
+            elif category == "suggestion":
+                suggestion_rows.append(_to_trend_row(raw_row, reason))
+
+        total_processed += len(batch_rows)
 
     written = 0
 
@@ -56,5 +68,6 @@ def classify_and_write_trends(sheet_client, rows):
         print(f"[CLASSIFIER] suggestion 저장: {len(suggestion_rows)}건")
         written += len(suggestion_rows)
 
-    print(f"[CLASSIFIER] 총 저장 건수: {written}")
+    print(f"[CLASSIFIER] 배치 처리 완료: {total_processed}건")
+    print(f"[CLASSIFIER] 최종 저장 건수: {written}건")
     return written
