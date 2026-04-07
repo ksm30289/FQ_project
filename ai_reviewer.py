@@ -5,7 +5,7 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 SYSTEM_PROMPT = """
-너는 게임 커뮤니티 분석 AI다.
+너는 게임 '페어리테일 퀘스트'의 커뮤니티 분석 AI다.
 
 아래 메시지를 분석해서 다음 중 하나로 분류해라:
 
