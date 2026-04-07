@@ -4,3 +4,8 @@ google-api-python-client==2.149.0
 google-auth-httplib2==0.2.0
 google-auth-oauthlib==1.2.1
 python-dateutil==2.9.0.post0
+
+# 🔽 추가 추천
+openai>=1.0.0        # AI 검수/분류용
+pandas>=2.2.0        # 데이터 처리 (중복, 필터링)
+python-dotenv>=1.0.1 # 환경변수 관리 (Railway 필수)
