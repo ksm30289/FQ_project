@@ -16,9 +16,6 @@ SCOPES = [
 ]
 
 
-# =========================
-# ENV
-# =========================
 def _get_env(name: str, default: str = "") -> str:
     value = os.getenv(name)
     if value is None:
@@ -31,8 +28,8 @@ def _get_int_env(name: str, default: int) -> int:
     if value is None or str(value).strip() == "":
         return default
     try:
-        return int(value)
-    except:
+        return int(str(value).strip())
+    except Exception:
         return default
 
 
@@ -40,7 +37,7 @@ def _get_bool_env(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
         return default
-    return str(value).lower() in ("1", "true", "yes")
+    return str(value).strip().lower() in ("1", "true", "yes", "y", "on")
 
 
 DRIVE_FOLDER_ID = _get_env("DRIVE_FOLDER_ID")
@@ -53,14 +50,11 @@ RETRY_SLEEP = 1.2
 GOOGLE_DOC_MIME = "application/vnd.google-apps.document"
 
 
-def log(msg: str):
+def log(msg: str) -> None:
     if DEBUG_LOG:
         print(msg)
 
 
-# =========================
-# CLIENT
-# =========================
 class GoogleDriveClient:
     def __init__(self):
         creds_info = get_google_credentials_dict()
@@ -73,9 +67,6 @@ class GoogleDriveClient:
             cache_discovery=False,
         )
 
-    # =========================
-    # FILE LIST
-    # =========================
     def list_txt_files(self, limit: Optional[int] = None) -> List[Dict]:
         if limit is None:
             limit = MAX_FILES_PER_RUN
@@ -85,23 +76,22 @@ class GoogleDriveClient:
             "("
             "mimeType = 'text/plain' "
             f"or mimeType = '{GOOGLE_DOC_MIME}'"
-            ")"
+            ")",
         ]
 
         if DRIVE_FOLDER_ID:
             query_parts.append(f"'{DRIVE_FOLDER_ID}' in parents")
 
         query = " and ".join(query_parts)
-
         log(f"[Drive Query] {query}")
 
-        files = []
+        files: List[Dict] = []
         page_token = None
 
         while True:
             request = self.service.files().list(
                 q=query,
-                pageSize=min(100, limit - len(files)),
+                pageSize=min(100, max(1, limit - len(files))),
                 pageToken=page_token,
                 fields="nextPageToken, files(id, name, mimeType, modifiedTime, size)",
                 orderBy="modifiedTime desc",
@@ -110,7 +100,6 @@ class GoogleDriveClient:
             )
 
             response = self._execute_with_retry(request)
-
             batch = response.get("files", [])
             files.extend(batch)
 
@@ -125,17 +114,39 @@ class GoogleDriveClient:
 
         return files[:limit]
 
-    # =========================
-    # DOWNLOAD
-    # =========================
-    def download_txt_file(self, file_id: str, mime_type: Optional[str] = None) -> str:
-        if mime_type is None:
-            meta = self.get_file_metadata(file_id)
-            mime_type = meta.get("mimeType")
+    def get_file_metadata(self, file_id: str) -> Dict:
+        request = self.service.files().get(
+            fileId=file_id,
+            fields="id, name, mimeType, size",
+            supportsAllDrives=True,
+        )
+        return self._execute_with_retry(request)
 
-    def read_text_file(self, file_id: str, mime_type: Optional[str] = None) -> str:
-        return self.download_txt_file(file_id, mime_type)
-        
+    def _download_request_bytes(self, request) -> bytes:
+        fh = io.BytesIO()
+        downloader = MediaIoBaseDownload(fh, request)
+
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+        return fh.getvalue()
+
+    def download_txt_file(self, file_id: str, mime_type: Optional[str] = None) -> str:
+        meta = self.get_file_metadata(file_id)
+
+        actual_name = str(meta.get("name", "")).strip()
+        actual_mime = str(meta.get("mimeType", "")).strip()
+        actual_size = str(meta.get("size", "")).strip()
+
+        if not mime_type:
+            mime_type = actual_mime
+
+        log(
+            f"[Drive] download start "
+            f"id={file_id} name={actual_name} mime={mime_type} size={actual_size or 'unknown'}"
+        )
+
         if mime_type == GOOGLE_DOC_MIME:
             request = self.service.files().export_media(
                 fileId=file_id,
@@ -144,32 +155,35 @@ class GoogleDriveClient:
         else:
             request = self.service.files().get_media(fileId=file_id)
 
-        fh = io.BytesIO()
-        downloader = MediaIoBaseDownload(fh, request)
+        raw_bytes = self._download_request_bytes(request)
+        log(f"[Drive] downloaded bytes={len(raw_bytes)}")
 
-        done = False
+        if not raw_bytes:
+            log("[Drive] downloaded content is empty")
+            return ""
 
-        while not done:
-            _, done = downloader.next_chunk()
+        for encoding in ("utf-8-sig", "utf-8", "cp949", "euc-kr", "utf-16"):
+            try:
+                text = raw_bytes.decode(encoding)
+                log(f"[Drive] decode success encoding={encoding} text_len={len(text)}")
+                preview = repr(text[:120])
+                log(f"[Drive] preview={preview}")
+                return text
+            except UnicodeDecodeError:
+                continue
 
-        content = fh.getvalue()
+        text = raw_bytes.decode("utf-8", errors="replace")
+        log(f"[Drive] decode fallback utf-8-replace text_len={len(text)}")
+        preview = repr(text[:120])
+        log(f"[Drive] preview={preview}")
+        return text
 
-        return content.decode("utf-8-sig", errors="replace")
+    def read_text_file(self, file_id: str, mime_type: Optional[str] = None) -> str:
+        return self.download_txt_file(file_id, mime_type)
 
-    # =========================
-    # METADATA
-    # =========================
-    def get_file_metadata(self, file_id: str) -> Dict:
-        request = self.service.files().get(
-            fileId=file_id,
-            fields="id, name, mimeType",
-            supportsAllDrives=True,
-        )
-        return self._execute_with_retry(request)
+    def download_text_file(self, file_id: str, mime_type: Optional[str] = None) -> str:
+        return self.download_txt_file(file_id, mime_type)
 
-    # =========================
-    # RETRY
-    # =========================
     def _execute_with_retry(self, request):
         last_error = None
 
