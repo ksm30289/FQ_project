@@ -1,7 +1,7 @@
 import importlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Set, Tuple
-from your_filter_file import should_keep_for_trend
+from filter import should_keep_for_trend
 
 from config import (
     AI_REVIEW_ENABLED,
