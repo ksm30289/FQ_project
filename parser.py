@@ -1,14 +1,9 @@
 import re
 from typing import Dict, List, Optional
 
-from config import EXCLUDED_USERNAMES, IGNORE_SYSTEM_MESSAGES
+from config import EXCLUDED_USERNAMES, IGNORE_SYSTEM_MESSAGES, DEBUG_LOG
 
 
-# =====================================
-# 카카오톡 내보내기 포맷 지원
-# 1) 2026. 4. 7. 오후 7:50, 사용자 : 메시지
-# 2) 2026년 4월 7일 오후 7:50, 사용자 : 메시지
-# =====================================
 DATE_LINE_PATTERNS = [
     re.compile(
         r"^(\d{4})\.\s*(\d{1,2})\.\s*(\d{1,2})\.\s*(오전|오후)\s+(\d{1,2}):(\d{2}),\s*(.+?)\s*:\s*(.*)$"
@@ -18,20 +13,13 @@ DATE_LINE_PATTERNS = [
     ),
 ]
 
-
-# =====================================
-# 무시할 헤더/안내 줄
-# =====================================
 HEADER_PATTERNS = [
     re.compile(r"^카카오톡 대화$"),
     re.compile(r"^저장한 날짜\s*:\s*.*$"),
+    re.compile(r"^Talk_.*\.txt$"),
+    re.compile(r"^\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*.*$"),
 ]
 
-
-# =====================================
-# 시스템 메시지 패턴
-# 필요하면 여기에 계속 추가 가능
-# =====================================
 SYSTEM_MESSAGE_PATTERNS = [
     re.compile(r"^.*님이 들어왔습니다\.$"),
     re.compile(r"^.*님이 나갔습니다\.$"),
@@ -41,11 +29,16 @@ SYSTEM_MESSAGE_PATTERNS = [
     re.compile(r"^운영정책을 위반한 메시지로 신고 접수.*"),
     re.compile(r"^메시지를 가렸습니다\.$"),
     re.compile(r"^삭제된 메시지입니다\.$"),
-    re.compile(r"^사진 \d+장$"),
+    re.compile(r"^사진(?: \d+장)?$"),
     re.compile(r"^동영상$"),
     re.compile(r"^이모티콘$"),
     re.compile(r"^파일: .*"),
 ]
+
+
+def log_debug(msg: str) -> None:
+    if DEBUG_LOG:
+        print(msg)
 
 
 def _normalize_text(value: str) -> str:
@@ -54,7 +47,6 @@ def _normalize_text(value: str) -> str:
 
 def _normalize_user(user: str) -> str:
     user = _normalize_text(user)
-    # "3서버 / 와일드바" -> "3서버/와일드바"
     user = re.sub(r"\s*/\s*", "/", user)
     user = re.sub(r"\s+", " ", user).strip()
     return user
@@ -134,14 +126,22 @@ def parse_chat_text(text: str, source_file_name: str = "") -> List[Dict[str, str
     rows: List[Dict[str, str]] = []
 
     if not text or not str(text).strip():
+        log_debug("[PARSER] 빈 텍스트")
         return rows
 
+    lines = text.splitlines()
+    log_debug(f"[PARSER] source_file_name={source_file_name}")
+    log_debug(f"[PARSER] 전체 라인 수={len(lines)}")
+    log_debug(f"[PARSER] 첫 5줄 샘플={repr(lines[:5])}")
+
     current_row: Optional[Dict[str, str]] = None
+    matched_count = 0
+    unmatched_samples = []
 
-    for raw_line in text.splitlines():
-        line = raw_line.strip().lstrip("\ufeff").replace("\u200b", "")
+    for idx, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip().lstrip("\ufeff").replace("\u200b", "").replace("\xa0", " ")
 
-        if not line.strip():
+        if not line:
             continue
 
         if _is_header_line(line):
@@ -150,6 +150,7 @@ def parse_chat_text(text: str, source_file_name: str = "") -> List[Dict[str, str
         parsed = _parse_date_line(line)
 
         if parsed is not None:
+            matched_count += 1
             user = parsed["user"]
             message = parsed["message"]
 
@@ -171,10 +172,14 @@ def parse_chat_text(text: str, source_file_name: str = "") -> List[Dict[str, str
             rows.append(current_row)
             continue
 
-        # 날짜 패턴이 아니면 이전 메시지의 멀티라인으로 간주
+        if len(unmatched_samples) < 10:
+            unmatched_samples.append((idx, line))
+
         if current_row is not None:
-            extra = line.strip()
-            if extra:
-                current_row["message"] = f"{current_row['message']}\n{extra}"
+            current_row["message"] = f"{current_row['message']}\n{line}"
+
+    log_debug(f"[PARSER] 날짜 패턴 매치 수={matched_count}")
+    log_debug(f"[PARSER] 최종 rows 수={len(rows)}")
+    log_debug(f"[PARSER] unmatched 샘플={unmatched_samples}")
 
     return rows
