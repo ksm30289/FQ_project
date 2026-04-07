@@ -1,149 +1,302 @@
 import json
-from typing import Dict, List
+import os
+import re
+import time
+from typing import Dict, Any, List, Optional
 
 from openai import OpenAI
 
-from config import OPENAI_API_KEY, AI_REVIEW_MODEL
+
+def _get_env(name: str, default: Optional[str] = None) -> str:
+    value = os.getenv(name, default)
+    if value is None:
+        raise RuntimeError(f"환경변수 누락: {name}")
+    return value
 
 
-SYSTEM_PROMPT = """
-너는 게임 "페어리테일 퀘스트"의 커뮤니티 대화 분류기다.
+OPENAI_API_KEY = _get_env("OPENAI_API_KEY")
+OPENAI_MODEL = _get_env("OPENAI_MODEL", "gpt-4o-mini")
+AI_REVIEW_ENABLED = _get_env("AI_REVIEW_ENABLED", "true").lower() == "true"
+AI_MIN_CONFIDENCE = float(_get_env("AI_MIN_CONFIDENCE", "0.80"))
+AI_MAX_RETRIES = int(_get_env("AI_MAX_RETRIES", "3"))
+AI_RETRY_SLEEP_SEC = float(_get_env("AI_RETRY_SLEEP_SEC", "1.2"))
 
-각 메시지를 아래 4가지 중 하나로 분류한다.
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-- negative:
-  불만, 비판, 짜증, 욕설, 운영/밸런스/버그에 대한 부정적 반응, 실망, 문제 제기
-- positive:
-  칭찬, 만족, 감사, 좋은 평가, 재미있다/괜찮다/잘했다 같은 긍정 반응
-- suggestion:
-  개선 아이디어, 요청, 제안, 건의, ~해달라/~였으면 좋겠다 식의 의견
-- ignore:
-  잡담, 인사, 의미 없는 짧은 반응, 단순 대화, 분류 가치가 낮은 메시지
 
-규칙:
-1. 반드시 JSON 배열만 출력한다.
-2. 배열 길이는 입력 메시지 수와 같게 맞춘다.
-3. 각 원소는 반드시 아래 형식만 사용한다.
-{
-  "index": 1,
-  "category": "negative|positive|suggestion|ignore",
-  "reason": "짧은 판단 이유"
+SKIP_EXACT = {
+    "ㅋ", "ㅋㅋ", "ㅋㅋㅋ", "ㅋㅋㅋㅋ",
+    "ㅎ", "ㅎㅎ", "ㅎㅎㅎ", "ㅎㅎㅎㅎ",
+    "ㅠ", "ㅠㅠ", "ㅜ", "ㅜㅜ",
+    "ㄷㄷ", "ㅇㅇ", "ㄴㄴ", "ㄱㄱ",
+    "네", "넵", "예", "아", "오", "와", "헐", "굿",
+    "하이", "안녕", "ㅂㅂ", "잘자", "출첵",
 }
-4. index는 입력의 index와 정확히 동일해야 한다.
-5. 코드블록 마크다운은 쓰지 않는다.
-6. reason은 30자 이내 한국어로 작성한다.
-"""
+
+SKIP_PATTERNS = [
+    r"^[ㅋㅎㅠㅜ]+$",
+    r"^[!?~.,\s]+$",
+    r"^[0-9\s]+$",
+    r"^(네|넵|예|ㅇㅇ|ㄴㄴ|ㄱㄱ|오|와|헐|굿)$",
+    r"^(안녕|하이|ㅂㅂ|잘자|출첵)$",
+]
+
+QUESTION_HINTS = [
+    "?", "어떻게", "왜", "뭐임", "뭔가", "되는거", "되는 거",
+    "됨?", "임?", "인가", "있음?", "없음?", "가능?", "맞음?",
+    "버그인가", "왜 안", "어디서", "몇렙", "몇 레벨", "어케",
+]
+
+SUGGESTION_KEYWORDS = [
+    "해줘", "해주세요", "해줬으면", "해주면", "추가해", "추가해주세요",
+    "개선", "개편", "바꿔", "수정해", "필요", "있었으면", "있으면 좋겠다",
+    "만들어줘", "줘야", "늘려줘", "줄여줘", "지원해줘",
+]
+
+POSITIVE_KEYWORDS = [
+    "좋다", "좋네", "좋아요", "좋음", "재밌다", "재미있다", "꿀잼", "만족",
+    "잘했다", "잘했네", "괜찮다", "혜자", "편하다", "마음에 든다",
+    "갓", "최고", "추천", "호감", "잘 만든",
+]
+
+NEGATIVE_KEYWORDS = [
+    "별로", "불편", "짜증", "망", "망했다", "어렵다", "너무 어렵", "문제",
+    "실망", "최악", "이상하다", "이상함", "버그", "안됨", "안 된다",
+    "렉", "끊김", "답답", "불만", "구리다", "구림",
+]
 
 
-def _get_client() -> OpenAI:
-    return OpenAI(api_key=OPENAI_API_KEY)
+def normalize_text(text: str) -> str:
+    t = (text or "").strip()
+    t = re.sub(r"\s+", " ", t)
+    return t
 
 
-def _build_payload(rows: List[Dict]) -> List[Dict]:
-    payload = []
-    for idx, row in enumerate(rows, start=1):
-        payload.append({
-            "index": idx,
-            "user": row.get("user", ""),
-            "message": row.get("message", ""),
-        })
-    return payload
+def compact_text(text: str) -> str:
+    return re.sub(r"\s+", "", (text or "").strip())
 
 
-def _normalize_item(item: Dict, expected_index: int) -> Dict:
-    if not isinstance(item, dict):
+def is_short_or_low_value_message(text: str) -> bool:
+    t = normalize_text(text)
+    c = compact_text(text)
+
+    if not t:
+        return True
+
+    if t in SKIP_EXACT:
+        return True
+
+    if len(t) <= 2 or len(c) <= 3:
+        return True
+
+    for pattern in SKIP_PATTERNS:
+        if re.match(pattern, t):
+            return True
+
+    return False
+
+
+def is_question_message(text: str) -> bool:
+    t = normalize_text(text)
+    for q in QUESTION_HINTS:
+        if q in t:
+            return True
+    return False
+
+
+def contains_any(text: str, keywords: List[str]) -> bool:
+    t = normalize_text(text)
+    return any(k in t for k in keywords)
+
+
+def rule_based_precheck(text: str) -> Optional[Dict[str, Any]]:
+    """
+    AI 호출 전에 무조건 걸러야 할 메시지 처리.
+    반환값이 있으면 그 결과를 그대로 사용.
+    """
+    t = normalize_text(text)
+
+    if is_short_or_low_value_message(t):
         return {
-            "index": expected_index,
             "category": "ignore",
-            "reason": "응답 형식 오류",
+            "confidence": 0.99,
+            "reason": "짧은 반응/잡담/의미 낮은 메시지"
         }
 
-    try:
-        index = int(item.get("index", expected_index))
-    except Exception:
-        index = expected_index
+    if is_question_message(t):
+        # 질문은 원칙적으로 ignore
+        return {
+            "category": "ignore",
+            "confidence": 0.98,
+            "reason": "질문 또는 정보 요청성 메시지"
+        }
 
-    category = str(item.get("category", "ignore")).strip().lower()
-    reason = str(item.get("reason", "")).strip()
+    return None
 
-    if category not in {"negative", "positive", "suggestion", "ignore"}:
+
+def build_prompt(message: str) -> str:
+    return f"""
+다음 유저 메시지를 반드시 아래 5개 중 하나로만 분류하라.
+
+카테고리 정의:
+- positive: 게임/업데이트/운영 등에 대한 명확한 칭찬, 만족, 긍정 평가
+- negative: 게임/업데이트/운영 등에 대한 명확한 불만, 문제 제기, 불편, 비판
+- suggestion: 개선 요청, 추가 요구, 바라는 점, 변경 요청
+- trend: 유저들이 반복적으로 언급하는 이슈/관심사/화제에 해당하는 내용
+- ignore: 잡담, 질문, 단순 반응, 의미 없는 채팅, 문맥 부족, 분류 가치 낮은 내용
+
+반드시 지킬 규칙:
+1. 질문은 무조건 ignore
+2. 짧거나 맥락 없는 문장은 ignore
+3. 감정이 명확하지 않으면 ignore
+4. 단순 정보 전달은 기본적으로 ignore
+5. trend는 개인 잡담이 아니라 실제 이슈/화제성이 있을 때만 선택
+6. suggestion은 실제 요청/개선의도가 명확할 때만 선택
+7. 절대 억지로 분류하지 마라
+8. 애매하면 무조건 ignore
+
+추가 판단 기준:
+- "어떻게 함?", "~임?", "왜 안됨?" 같은 질문형은 ignore
+- "ㅋㅋ", "헐", "오", "굿" 같은 단순 반응은 ignore
+- 긍정/부정은 명시적 표현이 있을 때만 선택
+- confidence는 0.00~1.00 사이 실수로 반환
+
+출력은 반드시 JSON 한 줄만:
+{{"category":"ignore","confidence":0.95,"reason":"짧은 질문"}}
+
+유저 메시지:
+{message}
+""".strip()
+
+
+def _safe_json_loads(text: str) -> Dict[str, Any]:
+    text = text.strip()
+
+    # 코드블록 제거
+    text = re.sub(r"^```json\s*", "", text)
+    text = re.sub(r"^```\s*", "", text)
+    text = re.sub(r"\s*```$", "", text)
+
+    return json.loads(text)
+
+
+def _post_validate(message: str, result: Dict[str, Any]) -> Dict[str, Any]:
+    category = str(result.get("category", "ignore")).strip().lower()
+    confidence = result.get("confidence", 0.0)
+    reason = str(result.get("reason", "")).strip()
+
+    allowed = {"positive", "negative", "suggestion", "trend", "ignore"}
+    if category not in allowed:
         category = "ignore"
 
-    if not reason:
-        reason = "자동 보정"
+    try:
+        confidence = float(confidence)
+    except Exception:
+        confidence = 0.0
+
+    if confidence < 0:
+        confidence = 0.0
+    if confidence > 1:
+        confidence = 1.0
+
+    t = normalize_text(message)
+
+    # 질문이면 무조건 ignore
+    if is_question_message(t):
+        return {
+            "category": "ignore",
+            "confidence": max(confidence, 0.95),
+            "reason": "질문형 메시지"
+        }
+
+    # 짧은 반응이면 무조건 ignore
+    if is_short_or_low_value_message(t):
+        return {
+            "category": "ignore",
+            "confidence": max(confidence, 0.98),
+            "reason": "짧은 반응/잡담"
+        }
+
+    # suggestion 과잉 방지
+    if category == "suggestion" and not contains_any(t, SUGGESTION_KEYWORDS):
+        return {
+            "category": "ignore",
+            "confidence": 0.90,
+            "reason": "건의 의도가 명확하지 않음"
+        }
+
+    # positive 과잉 방지
+    if category == "positive" and not contains_any(t, POSITIVE_KEYWORDS):
+        if confidence < 0.90:
+            return {
+                "category": "ignore",
+                "confidence": 0.88,
+                "reason": "명시적 긍정 표현 부족"
+            }
+
+    # negative 과잉 방지
+    if category == "negative" and not contains_any(t, NEGATIVE_KEYWORDS):
+        if confidence < 0.90:
+            return {
+                "category": "ignore",
+                "confidence": 0.88,
+                "reason": "명시적 부정 표현 부족"
+            }
+
+    # confidence 낮으면 ignore
+    if category != "ignore" and confidence < AI_MIN_CONFIDENCE:
+        return {
+            "category": "ignore",
+            "confidence": confidence,
+            "reason": f"confidence 부족({confidence:.2f})"
+        }
 
     return {
-        "index": index,
         "category": category,
-        "reason": reason,
+        "confidence": confidence,
+        "reason": reason or "AI 분류"
     }
 
 
-def classify_message_batch(rows: List[Dict]) -> List[Dict]:
-    if not rows:
-        return []
+def review_message_with_ai(message: str) -> Dict[str, Any]:
+    if not AI_REVIEW_ENABLED:
+        return {
+            "category": "ignore",
+            "confidence": 0.0,
+            "reason": "AI_REVIEW_ENABLED=false"
+        }
 
-    client = _get_client()
-    payload = _build_payload(rows)
+    message = normalize_text(message)
 
-    user_prompt = (
-        "다음 입력 메시지들을 분류해라.\n"
-        "반드시 JSON 배열만 출력해라.\n\n"
-        f"{json.dumps(payload, ensure_ascii=False, indent=2)}"
-    )
+    prechecked = rule_based_precheck(message)
+    if prechecked is not None:
+        return prechecked
 
-    print(f"[AI] 분류 요청 시작: {len(rows)}건 / model={AI_REVIEW_MODEL}")
+    prompt = build_prompt(message)
 
-    response = client.chat.completions.create(
-        model=AI_REVIEW_MODEL,
-        temperature=0,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
-
-    content = (response.choices[0].message.content or "").strip()
-    print(f"[AI] 응답 미리보기: {content[:500]}")
-
-    try:
-        raw_result = json.loads(content)
-    except Exception as e:
-        raise RuntimeError(f"AI 응답 JSON 파싱 실패: {e} / content={content}") from e
-
-    if not isinstance(raw_result, list):
-        raise RuntimeError("AI 응답이 JSON 배열이 아닙니다.")
-
-    expected_count = len(rows)
-
-    normalized_items = []
-    for idx, item in enumerate(raw_result, start=1):
-        normalized_items.append(_normalize_item(item, idx))
-
-    # index 기준으로 재정렬 + 중복 제거
-    by_index = {}
-    for item in normalized_items:
-        idx = item["index"]
-        if 1 <= idx <= expected_count and idx not in by_index:
-            by_index[idx] = item
-
-    # 빠진 index는 ignore로 보정
-    repaired = []
-    for idx in range(1, expected_count + 1):
-        repaired.append(
-            by_index.get(
-                idx,
-                {
-                    "index": idx,
-                    "category": "ignore",
-                    "reason": "응답 누락 자동보정",
-                },
+    last_error = None
+    for attempt in range(1, AI_MAX_RETRIES + 1):
+        try:
+            response = client.chat.completions.create(
+                model=OPENAI_MODEL,
+                temperature=0,
+                messages=[
+                    {"role": "system", "content": "너는 게임 페어리테일퀘스트 커뮤니티 메시지 분류기다."},
+                    {"role": "user", "content": prompt},
+                ],
             )
-        )
 
-    if len(raw_result) != expected_count:
-        print(
-            f"[WARN] AI 응답 개수 불일치 보정: 입력={expected_count}, 응답={len(raw_result)}, 최종={len(repaired)}"
-        )
+            raw = response.choices[0].message.content or ""
+            parsed = _safe_json_loads(raw)
+            return _post_validate(message, parsed)
 
-    return repaired
+        except Exception as e:
+            last_error = e
+            if attempt < AI_MAX_RETRIES:
+                time.sleep(AI_RETRY_SLEEP_SEC)
+
+    return {
+        "category": "ignore",
+        "confidence": 0.0,
+        "reason": f"AI 오류: {last_error}"
+    }
