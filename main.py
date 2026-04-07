@@ -1,6 +1,7 @@
 import importlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Set, Tuple
+from your_filter_file import should_keep_for_trend
 
 from config import (
     AI_REVIEW_ENABLED,
@@ -625,11 +626,20 @@ def main() -> None:
 
         # 5) 1차 분류
         print("[STEP] AI 분류 대상 수집 시작")
-        base_classified_rows: List[Dict[str, Any]] = []
+
+        base_classified_rows = []
+
         for row in new_rows:
+
+            # ✅ 여기 추가 (핵심 필터)
+            if not should_keep_for_trend(row):
+                total_ignored += 1
+                continue
+
             classified = _classify_row_base(row)
             if not classified:
                 continue
+
             trend_row = _build_trend_row(
                 raw_row=row,
                 category=classified["category"],
