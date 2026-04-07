@@ -1,34 +1,60 @@
-class TrendClassifier:
-    def __init__(self, sheet_client):
-        self.sheet_client = sheet_client
+from ai_reviewer import classify_message_batch
 
-    def split_by_category(self, rows):
-        positive = []
-        negative = []
-        suggestion = []
 
-        for r in rows:
-            c = r.get("category")
+def classify_and_write_trends(sheet_client, rows):
+    """
+    rows: raw_chat에 저장된 row dict 리스트
+    반환값: 분류 시트에 실제로 저장된 총 건수
+    """
+    if not rows:
+        print("[CLASSIFIER] 입력 rows 없음")
+        return 0
 
-            row = [
-                r["datetime"],
-                r["user"],
-                r["message"],
-            ]
+    print(f"[CLASSIFIER] 분류 시작: {len(rows)}건")
 
-            if c == "positive":
-                positive.append(row)
-            elif c == "negative":
-                negative.append(row)
-            elif c == "suggestion":
-                suggestion.append(row)
+    negative_rows = []
+    positive_rows = []
+    suggestion_rows = []
 
-        return positive, negative, suggestion
+    results = classify_message_batch(rows)
+    print(f"[CLASSIFIER] AI 결과 수: {len(results)}")
 
-    def upload(self, positive, negative, suggestion):
-        if positive:
-            self.sheet_client.append_to_sheet("긍정", positive)
-        if negative:
-            self.sheet_client.append_to_sheet("부정", negative)
-        if suggestion:
-            self.sheet_client.append_to_sheet("건의", suggestion)
+    for row, result in zip(rows, results):
+        category = (result.get("category") or "").strip().lower()
+        reason = (result.get("reason") or "").strip()
+
+        output_row = [
+            row.get("date", ""),
+            row.get("time", ""),
+            row.get("user", ""),
+            row.get("message", ""),
+            row.get("source_file", ""),
+            reason,
+        ]
+
+        if category == "negative":
+            negative_rows.append(output_row)
+        elif category == "positive":
+            positive_rows.append(output_row)
+        elif category == "suggestion":
+            suggestion_rows.append(output_row)
+
+    written = 0
+
+    if negative_rows:
+        sheet_client.append_negative_rows(negative_rows)
+        print(f"[CLASSIFIER] negative 저장: {len(negative_rows)}건")
+        written += len(negative_rows)
+
+    if positive_rows:
+        sheet_client.append_positive_rows(positive_rows)
+        print(f"[CLASSIFIER] positive 저장: {len(positive_rows)}건")
+        written += len(positive_rows)
+
+    if suggestion_rows:
+        sheet_client.append_suggestion_rows(suggestion_rows)
+        print(f"[CLASSIFIER] suggestion 저장: {len(suggestion_rows)}건")
+        written += len(suggestion_rows)
+
+    print(f"[CLASSIFIER] 총 저장 건수: {written}")
+    return written
