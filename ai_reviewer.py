@@ -1,77 +1,86 @@
-# ai_reviewer.py
-import json
-from typing import Dict, List
-
 from openai import OpenAI
-
-from config import OPENAI_API_KEY, AI_REVIEW_MODEL
+from config import OPENAI_API_KEY, AI_REVIEW_MODEL, AI_REVIEW_BATCH_SIZE
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-SYSTEM_PROMPT = """
-너는 게임 커뮤니티 채팅 분류 검수기다.
-아래 4개 라벨 중 하나만 선택해라.
 
-- negative: 게임/운영/서비스에 대한 불만, 문제, 오류, 이탈 징후
-- positive: 게임/운영/서비스에 대한 명확한 긍정 평가
-- suggestion: 기능 추가/변경/개선 요청
-- ignore: 잡담, 농담, 유저 간 사적 대화, 의미 없는 반응, 분류 가치 낮은 문장
+SYSTEM_PROMPT = """
+너는 게임 커뮤니티 분석 AI다.
+
+아래 메시지를 분석해서 다음 중 하나로 분류해라:
+
+1. positive (긍정)
+2. negative (불만/비판)
+3. suggestion (건의/개선요청)
+4. noise (잡담/무의미/맥락없는 대화)
 
 규칙:
-1. 반드시 4개 중 하나만 고른다.
-2. 게임/운영/서비스와 관련 없는 대화는 ignore다.
-3. 단순 감탄사, 맞장구, 잡담은 ignore다.
-4. 문맥이 약하면 보수적으로 ignore를 선택한다.
-5. 출력은 JSON 객체 하나만 반환한다.
+- 게임 관련 없는 대화는 noise
+- 짧은 감탄, 욕설 단독은 noise
+- 개선 요청은 suggestion
+- 칭찬/만족은 positive
+- 불만/버그/비판은 negative
+
+출력은 JSON 배열로만:
+[
+  {"category": "..."}
+]
 """
 
-JSON_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "label": {
-            "type": "string",
-            "enum": ["negative", "positive", "suggestion", "ignore"]
-        },
-        "reason": {
-            "type": "string"
-        }
-    },
-    "required": ["label", "reason"],
-    "additionalProperties": False
-}
+
+def chunk_list(data, size):
+    for i in range(0, len(data), size):
+        yield data[i:i + size]
 
 
-def review_message_with_ai(message: str, detected_keywords: List[str]) -> Dict[str, str]:
-    user_prompt = f"""
-메시지:
-{message}
+def classify_batch(messages: list):
+    """
+    messages: ["텍스트1", "텍스트2", ...]
+    """
+    if not messages:
+        return []
 
-키워드 기반 후보:
-{", ".join(detected_keywords) if detected_keywords else "(없음)"}
+    prompt = "메시지 목록:\n"
+    for i, m in enumerate(messages):
+        prompt += f"{i+1}. {m}\n"
 
-위 메시지를 최종 분류해라.
-"""
+    try:
+        response = client.chat.completions.create(
+            model=AI_REVIEW_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0,
+        )
 
-    response = client.responses.create(
-        model=AI_REVIEW_MODEL,
-        input=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        text={
-            "format": {
-                "type": "json_schema",
-                "name": "trend_review",
-                "schema": JSON_SCHEMA,
-                "strict": True,
-            }
-        },
-    )
+        content = response.choices[0].message.content
 
-    raw_text = response.output_text
-    data = json.loads(raw_text)
+        import json
+        result = json.loads(content)
 
-    return {
-        "label": data["label"],
-        "reason": data["reason"].strip(),
-    }
+        return [r["category"] for r in result]
+
+    except Exception as e:
+        print(f"[AI ERROR] {e}")
+        return ["noise"] * len(messages)
+
+
+def classify_messages(rows: list):
+    """
+    rows:
+    [
+        {"datetime":..., "user":..., "message":...}
+    ]
+    """
+    results = []
+
+    for chunk in chunk_list(rows, AI_REVIEW_BATCH_SIZE):
+        messages = [r["message"] for r in chunk]
+        categories = classify_batch(messages)
+
+        for r, c in zip(chunk, categories):
+            r["category"] = c
+            results.append(r)
+
+    return results
