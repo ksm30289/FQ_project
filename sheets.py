@@ -158,3 +158,19 @@ class GoogleSheetClient:
                 existing_hashes.add(row_hash)
 
         return upload_rows
+
+    # ✅ 추가된 범용 시트 append 함수
+    def append_to_sheet(self, sheet_name: str, rows: list):
+        """
+        아무 시트에나 데이터 추가할 때 사용하는 유틸 함수
+        (긍정/부정/건의 등 확장용)
+        """
+        if not rows:
+            return
+
+        try:
+            ws = self.sh.worksheet(sheet_name)
+        except gspread.WorksheetNotFound:
+            ws = self.sh.add_worksheet(title=sheet_name, rows=1000, cols=10)
+
+        ws.append_rows(rows, value_input_option="USER_ENTERED")
