@@ -1,86 +1,80 @@
+import os
+import json
 from openai import OpenAI
-from config import OPENAI_API_KEY, AI_REVIEW_MODEL, AI_REVIEW_BATCH_SIZE
-
-client = OpenAI(api_key=OPENAI_API_KEY)
 
 
 SYSTEM_PROMPT = """
-너는 게임 '페어리테일 퀘스트'의 커뮤니티 분석 AI다.
+너는 게임 "페어리테일 퀘스트" 커뮤니티 대화 분류기다.
+각 메시지를 아래 4개 중 하나로 분류한다.
 
-아래 메시지를 분석해서 다음 중 하나로 분류해라:
+- negative: 불만, 비판, 욕설, 부정적 평가, 문제 제기
+- positive: 칭찬, 만족, 긍정 반응
+- suggestion: 개선 제안, 아이디어, 요청, 건의
+- ignore: 잡담, 의미 없는 대화, 분류 가치 낮음
 
-1. positive (긍정)
-2. negative (불만/비판)
-3. suggestion (건의/개선요청)
-4. noise (잡담/무의미/맥락없는 대화)
-
-규칙:
-- 게임 관련 없는 대화는 noise
-- 짧은 감탄, 욕설 단독은 noise
-- 개선 요청은 suggestion
-- 칭찬/만족은 positive
-- 불만/버그/비판은 negative
-
-출력은 JSON 배열로만:
-[
-  {"category": "..."}
-]
+반드시 JSON 배열로만 답변해라.
+각 원소는 아래 형식:
+{
+  "category": "negative|positive|suggestion|ignore",
+  "reason": "짧은 판단 이유"
+}
 """
 
 
-def chunk_list(data, size):
-    for i in range(0, len(data), size):
-        yield data[i:i + size]
+def get_openai_client():
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise ValueError("OPENAI_API_KEY 환경변수가 비어 있습니다.")
+    return OpenAI(api_key=api_key)
 
 
-def classify_batch(messages: list):
-    """
-    messages: ["텍스트1", "텍스트2", ...]
-    """
-    if not messages:
+def classify_message_batch(rows):
+    if not rows:
         return []
 
-    prompt = "메시지 목록:\n"
-    for i, m in enumerate(messages):
-        prompt += f"{i+1}. {m}\n"
+    client = get_openai_client()
+
+    payload = []
+    for idx, row in enumerate(rows, start=1):
+        payload.append({
+            "index": idx,
+            "user": row.get("user", ""),
+            "message": row.get("message", ""),
+        })
+
+    user_prompt = f"""
+다음 메시지들을 분류해라.
+반드시 JSON 배열만 출력해라.
+
+입력:
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+"""
+
+    print(f"[AI] 분류 요청 시작: {len(rows)}건")
+
+    response = client.chat.completions.create(
+        model="gpt-4.1-mini",
+        temperature=0,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+
+    content = response.choices[0].message.content.strip()
+    print(f"[AI] 원본 응답: {content[:500]}")
 
     try:
-        response = client.chat.completions.create(
-            model=AI_REVIEW_MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0,
+        result = json.loads(content)
+    except Exception as e:
+        raise ValueError(f"AI 응답 JSON 파싱 실패: {e} / content={content}")
+
+    if not isinstance(result, list):
+        raise ValueError("AI 응답이 리스트(JSON 배열)가 아닙니다.")
+
+    if len(result) != len(rows):
+        raise ValueError(
+            f"AI 응답 개수 불일치: 입력={len(rows)}, 응답={len(result)}"
         )
 
-        content = response.choices[0].message.content
-
-        import json
-        result = json.loads(content)
-
-        return [r["category"] for r in result]
-
-    except Exception as e:
-        print(f"[AI ERROR] {e}")
-        return ["noise"] * len(messages)
-
-
-def classify_messages(rows: list):
-    """
-    rows:
-    [
-        {"datetime":..., "user":..., "message":...}
-    ]
-    """
-    results = []
-
-    for chunk in chunk_list(rows, AI_REVIEW_BATCH_SIZE):
-        messages = [r["message"] for r in chunk]
-        categories = classify_batch(messages)
-
-        for r, c in zip(chunk, categories):
-            r["category"] = c
-            results.append(r)
-
-    return results
+    return result
