@@ -37,11 +37,22 @@ class GoogleSheetClient:
         self.positive_sheet = self._get_or_create_worksheet(POSITIVE_TREND_WORKSHEET_NAME)
         self.suggestion_sheet = self._get_or_create_worksheet(SUGGESTIONS_WORKSHEET_NAME)
 
+        # 선택 확장용: trend 시트가 config에 있으면 생성, 없으면 None
+        self.trend_sheet = None
+        try:
+            from config import TREND_WORKSHEET_NAME
+            self.trend_sheet = self._get_or_create_worksheet(TREND_WORKSHEET_NAME)
+        except Exception:
+            self.trend_sheet = None
+
         self._ensure_raw_sheet_header()
         self._ensure_file_dedup_header()
         self._ensure_trend_sheet_header(self.negative_sheet)
         self._ensure_trend_sheet_header(self.positive_sheet)
         self._ensure_trend_sheet_header(self.suggestion_sheet)
+
+        if self.trend_sheet is not None:
+            self._ensure_trend_sheet_header(self.trend_sheet)
 
     def _get_or_create_worksheet(self, title: str, rows: int = 1000, cols: int = 20):
         try:
@@ -87,8 +98,8 @@ class GoogleSheetClient:
 
         result = set()
         for row in values[1:]:
-            if len(row) > row_hash_idx and row[row_hash_idx].strip():
-                result.add(row[row_hash_idx].strip())
+            if len(row) > row_hash_idx and str(row[row_hash_idx]).strip():
+                result.add(str(row[row_hash_idx]).strip())
         return result
 
     def get_processed_file_keys(self):
@@ -96,10 +107,17 @@ class GoogleSheetClient:
         if len(values) <= 1:
             return set()
 
+        header = values[0]
+        file_key_idx = 0
+        try:
+            file_key_idx = header.index("file_key")
+        except ValueError:
+            file_key_idx = 0
+
         result = set()
         for row in values[1:]:
-            if row and row[0].strip():
-                result.add(row[0].strip())
+            if len(row) > file_key_idx and str(row[file_key_idx]).strip():
+                result.add(str(row[file_key_idx]).strip())
         return result
 
     def mark_file_processed(self, file_key: str, file_name: str):
@@ -108,19 +126,69 @@ class GoogleSheetClient:
             value_input_option="USER_ENTERED",
         )
 
+    def append_processed_file_keys(self, rows):
+        """
+        rows 예시:
+        [
+            [file_key, file_name],
+            [file_key, file_name],
+        ]
+        """
+        if not rows:
+            return
+        self.file_dedup_sheet.append_rows(rows, value_input_option="USER_ENTERED")
+
     def append_raw_rows(self, rows):
+        """
+        rows가 dict 리스트여도 되고, 이미 정규화된 list 리스트여도 되게 처리.
+        dict 예시:
+        {
+            "datetime": "...",
+            "user": "...",
+            "message": "...",
+            "row_hash": "...",
+            "source_file": "..."
+        }
+
+        또는
+        {
+            "date": "...",
+            "time": "...",
+            "user": "...",
+            "message": "...",
+            "source_file_name": "...",
+            "row_hash": "..."
+        }
+        """
         if not rows:
             return
 
         normalized_rows = []
+
         for row in rows:
-            normalized_rows.append([
-                row.get("datetime", ""),
-                row.get("user", ""),
-                row.get("message", ""),
-                row.get("row_hash", ""),
-                row.get("source_file", ""),
-            ])
+            if isinstance(row, dict):
+                # 기존 포맷(datetime 기반)
+                if "datetime" in row:
+                    normalized_rows.append([
+                        row.get("datetime", ""),
+                        row.get("user", ""),
+                        row.get("message", ""),
+                        row.get("row_hash", ""),
+                        row.get("source_file", ""),
+                    ])
+                else:
+                    # 확장 포맷(date/time 분리 기반)
+                    normalized_rows.append([
+                        row.get("date", ""),
+                        row.get("time", ""),
+                        row.get("user", ""),
+                        row.get("message", ""),
+                        row.get("source_file_name", ""),
+                        row.get("row_hash", ""),
+                    ])
+            else:
+                # 이미 list 형태면 그대로 사용
+                normalized_rows.append(row)
 
         self.raw_sheet.append_rows(normalized_rows, value_input_option="USER_ENTERED")
 
@@ -135,3 +203,41 @@ class GoogleSheetClient:
     def append_suggestion_rows(self, rows):
         if rows:
             self.suggestion_sheet.append_rows(rows, value_input_option="USER_ENTERED")
+
+    def append_trend_rows(self, rows):
+        if not rows:
+            return
+
+        if self.trend_sheet is None:
+            raise RuntimeError(
+                "TREND_WORKSHEET_NAME 이 config.py에 정의되지 않았습니다. "
+                "디스코드 동향 시트를 쓰려면 config에 TREND_WORKSHEET_NAME을 추가하세요."
+            )
+
+        self.trend_sheet.append_rows(rows, value_input_option="USER_ENTERED")
+
+    def append_classified_rows(self, sheet_name: str, rows):
+        """
+        sheet_name 기준으로 적절한 시트에 append.
+        main.py에서 공통 라우팅할 때 사용.
+        """
+        if not rows:
+            return
+
+        name_map = {
+            NEGATIVE_TREND_WORKSHEET_NAME: self.negative_sheet,
+            POSITIVE_TREND_WORKSHEET_NAME: self.positive_sheet,
+            SUGGESTIONS_WORKSHEET_NAME: self.suggestion_sheet,
+        }
+
+        if self.trend_sheet is not None:
+            try:
+                from config import TREND_WORKSHEET_NAME
+                name_map[TREND_WORKSHEET_NAME] = self.trend_sheet
+            except Exception:
+                pass
+
+        if sheet_name not in name_map:
+            raise ValueError(f"알 수 없는 시트명: {sheet_name}")
+
+        name_map[sheet_name].append_rows(rows, value_input_option="USER_ENTERED")
