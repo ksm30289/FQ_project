@@ -98,13 +98,15 @@ def classify_message(message: str) -> dict[str, list[str]]:
     return result
 
 
-def make_trend_row(row: dict, detected_keywords: list[str]) -> list[str]:
+def make_trend_row(row: dict, detected_keywords: list[str], ai_label: str = "", ai_reason: str = "") -> list[str]:
     return [
         row.get("date", ""),
         row.get("time", ""),
         row.get("user_name", ""),
         row.get("message", ""),
-        ", ".join(detected_keywords)
+        ", ".join(detected_keywords),
+        ai_label,
+        ai_reason,
     ]
 
 
