@@ -1,89 +1,96 @@
-from io import BytesIO
-from typing import Dict, List
-
-from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload
+from google.oauth2.service_account import Credentials
+
+import io
 
 from config import (
-    ALLOWED_EXTENSIONS,
-    DRIVE_PROCESSED_FOLDER_ID,
     DRIVE_SOURCE_FOLDER_ID,
+    DRIVE_PROCESSED_FOLDER_ID,
+    ALLOWED_EXTENSIONS,
+    MOVE_PROCESSED_FILE,
     get_google_credentials_dict,
 )
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
-    "https://www.googleapis.com/auth/spreadsheets",
 ]
 
 
 class GoogleDriveClient:
     def __init__(self):
-        creds = Credentials.from_service_account_info(
-            get_google_credentials_dict(),
-            scopes=SCOPES,
-        )
-        self.service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        creds_info = get_google_credentials_dict()
+        creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
 
-    def list_txt_files(self, limit: int = 20) -> List[Dict]:
-        ext_conditions = " or ".join([f"name contains '{ext}'" for ext in ALLOWED_EXTENSIONS])
+        self.service = build("drive", "v3", credentials=creds)
+
+    def list_txt_files(self, limit=10):
+        """
+        Drive에서 txt 파일 목록 조회
+        """
         query = (
             f"'{DRIVE_SOURCE_FOLDER_ID}' in parents "
-            f"and trashed = false "
-            f"and ({ext_conditions})"
+            f"and trashed = false"
         )
 
-        resp = self.service.files().list(
+        results = self.service.files().list(
             q=query,
-            fields="files(id, name, size, createdTime, modifiedTime, mimeType, parents)",
-            orderBy="createdTime asc",
             pageSize=limit,
-            supportsAllDrives=True,
-            includeItemsFromAllDrives=True,
+            fields="files(id, name, size, modifiedTime)",
+            orderBy="createdTime desc",
         ).execute()
 
-        return resp.get("files", [])
+        files = results.get("files", [])
 
-    def download_text_file(self, file_id: str) -> str:
+        # 확장자 필터링 (여기서 미리 걸러서 속도 개선)
+        filtered = [
+            f for f in files
+            if any(f["name"].lower().endswith(ext) for ext in ALLOWED_EXTENSIONS)
+        ]
+
+        return filtered
+
+    def download_txt_file(self, file_id: str) -> str:
+        """
+        txt 파일 다운로드
+        """
         request = self.service.files().get_media(fileId=file_id)
-        fh = BytesIO()
+
+        fh = io.BytesIO()
         downloader = MediaIoBaseDownload(fh, request)
 
         done = False
         while not done:
             _, done = downloader.next_chunk()
 
-        content = fh.getvalue()
+        fh.seek(0)
+        return fh.read().decode("utf-8", errors="ignore")
 
-        for enc in ("utf-8-sig", "utf-8", "cp949", "euc-kr"):
-            try:
-                return content.decode(enc)
-            except UnicodeDecodeError:
-                continue
-
-        raise RuntimeError(f"파일 디코딩 실패: {file_id}")
-
-    # main.py 호환용 alias
-    def read_txt_file(self, file_id: str) -> str:
-        return self.download_text_file(file_id)
-
-    def move_to_processed(self, file_id: str):
-        if not DRIVE_PROCESSED_FOLDER_ID:
+    def move_file_to_processed(self, file_id: str):
+        """
+        처리 완료 파일을 processed 폴더로 이동
+        """
+        if not MOVE_PROCESSED_FILE or not DRIVE_PROCESSED_FOLDER_ID:
             return
 
-        meta = self.service.files().get(
-            fileId=file_id,
-            fields="id, parents",
-            supportsAllDrives=True,
-        ).execute()
+        try:
+            # 기존 부모 폴더 조회
+            file = self.service.files().get(
+                fileId=file_id,
+                fields="parents"
+            ).execute()
 
-        previous_parents = ",".join(meta.get("parents", []))
+            previous_parents = ",".join(file.get("parents", []))
 
-        self.service.files().update(
-            fileId=file_id,
-            addParents=DRIVE_PROCESSED_FOLDER_ID,
-            removeParents=previous_parents,
-            fields="id, parents",
-            supportsAllDrives=True,
-        ).execute()
+            # 폴더 이동
+            self.service.files().update(
+                fileId=file_id,
+                addParents=DRIVE_PROCESSED_FOLDER_ID,
+                removeParents=previous_parents,
+                fields="id, parents"
+            ).execute()
+
+            print(f"[INFO] 파일 이동 완료: {file_id}")
+
+        except Exception as e:
+            print(f"[ERROR] 파일 이동 실패: {file_id} | {e}")
