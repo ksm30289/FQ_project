@@ -1,4 +1,5 @@
-from config import FILE_DEDUP_MODE, MAX_FILES_PER_RUN
+# main.py
+from config import FILE_DEDUP_MODE, MAX_FILES_PER_RUN, AI_REVIEW_ENABLED
 from drive_client import GoogleDriveClient
 from parser import parse_chat_text
 from sheets import GoogleSheetClient, RAW_CHAT_SHEET, PROCESSED_FILES_SHEET, RAW_HEADERS
@@ -7,7 +8,9 @@ from trend_classifier import (
     TREND_HEADERS,
     classify_message,
     make_trend_row,
+    should_send_to_ai,
 )
+from ai_reviewer import review_message_with_ai
 
 TREND_SHEETS = ["negative_trend", "positive_trend", "suggestions"]
 
@@ -54,20 +57,28 @@ def row_dict_to_raw_row_list(row: dict) -> list:
     ]
 
 
+def map_ai_label_to_sheet(ai_label: str) -> str | None:
+    if ai_label == "negative":
+        return "negative_trend"
+    if ai_label == "positive":
+        return "positive_trend"
+    if ai_label == "suggestion":
+        return "suggestions"
+    return None
+
+
 def main():
     print("=== 작업 시작 ===")
 
     drive_client = GoogleDriveClient()
     sheet_client = GoogleSheetClient()
 
-    # 시트 준비
     sheet_client.ensure_sheet(RAW_CHAT_SHEET, RAW_HEADERS)
     sheet_client.ensure_sheet(PROCESSED_FILES_SHEET, ["file_key"])
 
     for trend_sheet in TREND_SHEETS:
         sheet_client.ensure_sheet(trend_sheet, TREND_HEADERS)
 
-    # 기존 중복 데이터 로딩
     existing_row_hashes = sheet_client.get_existing_row_hashes(RAW_CHAT_SHEET)
     processed_file_keys = sheet_client.get_processed_file_keys(PROCESSED_FILES_SHEET)
 
@@ -131,6 +142,8 @@ def main():
         }
 
         file_uploaded_count = 0
+        ai_review_count = 0
+        ai_ignore_count = 0
 
         for row in parsed_rows:
             row_hash = row.get("row_hash", "").strip()
@@ -147,7 +160,36 @@ def main():
             classified = classify_message(row.get("message", ""))
 
             for sheet_name, keywords in classified.items():
-                categorized_rows[sheet_name].append(make_trend_row(row, keywords))
+                target_sheet = sheet_name
+                ai_label = ""
+                ai_reason = ""
+
+                if AI_REVIEW_ENABLED and should_send_to_ai(row.get("message", "")):
+                    try:
+                        ai_result = review_message_with_ai(row.get("message", ""), keywords)
+                        ai_label = ai_result["label"]
+                        ai_reason = ai_result["reason"]
+                        ai_review_count += 1
+
+                        if ai_label == "ignore":
+                            ai_ignore_count += 1
+                            continue
+
+                        mapped_sheet = map_ai_label_to_sheet(ai_label)
+                        if mapped_sheet:
+                            target_sheet = mapped_sheet
+
+                    except Exception as e:
+                        print(f"[WARN] AI 검수 실패: {e}")
+                        ai_label = "fallback"
+                        ai_reason = "AI 검수 실패, 키워드 분류 유지"
+                else:
+                    ai_label = "skip"
+                    ai_reason = "짧은 메시지 또는 검수 제외"
+
+                categorized_rows[target_sheet].append(
+                    make_trend_row(row, keywords, ai_label, ai_reason)
+                )
 
         try:
             if raw_rows_to_upload:
@@ -160,7 +202,6 @@ def main():
             processed_file_keys_to_append.append(file_key)
             processed_file_keys.add(file_key)
 
-            # 처리 후 폴더 이동
             try:
                 drive_client.move_to_processed(file_id)
             except Exception as e:
@@ -175,7 +216,8 @@ def main():
                 f"parsed={len(parsed_rows)} / uploaded={file_uploaded_count} / "
                 f"negative={len(categorized_rows['negative_trend'])} / "
                 f"positive={len(categorized_rows['positive_trend'])} / "
-                f"suggestions={len(categorized_rows['suggestions'])}"
+                f"suggestions={len(categorized_rows['suggestions'])} / "
+                f"ai_review={ai_review_count} / ai_ignore={ai_ignore_count}"
             )
 
         except Exception as e:
