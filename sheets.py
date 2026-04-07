@@ -1,3 +1,6 @@
+import time
+from typing import Any, Dict, List, Set
+
 import gspread
 from google.oauth2.service_account import Credentials
 
@@ -8,10 +11,11 @@ from config import (
     NEGATIVE_TREND_WORKSHEET_NAME,
     POSITIVE_TREND_WORKSHEET_NAME,
     SUGGESTIONS_WORKSHEET_NAME,
+    TREND_WORKSHEET_NAME,
     WRITE_HEADER_IF_EMPTY,
     RAW_CHAT_HEADERS,
     TREND_HEADERS,
-    ROW_DEDUP_ENABLED,
+    DEBUG_LOG,
     get_google_credentials_dict,
 )
 
@@ -19,6 +23,17 @@ SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive",
 ]
+
+FILE_DEDUP_HEADERS = [
+    "file_id",
+    "file_name",
+    "file_key",
+]
+
+
+def log_debug(message: str) -> None:
+    if DEBUG_LOG:
+        print(message)
 
 
 class GoogleSheetClient:
@@ -32,212 +47,240 @@ class GoogleSheetClient:
 
         self.raw_sheet = self._get_or_create_worksheet(WORKSHEET_NAME)
         self.file_dedup_sheet = self._get_or_create_worksheet(FILE_DEDUP_WORKSHEET_NAME)
-
         self.negative_sheet = self._get_or_create_worksheet(NEGATIVE_TREND_WORKSHEET_NAME)
         self.positive_sheet = self._get_or_create_worksheet(POSITIVE_TREND_WORKSHEET_NAME)
-        self.suggestion_sheet = self._get_or_create_worksheet(SUGGESTIONS_WORKSHEET_NAME)
+        self.suggestions_sheet = self._get_or_create_worksheet(SUGGESTIONS_WORKSHEET_NAME)
+        self.trend_sheet = self._get_or_create_worksheet(TREND_WORKSHEET_NAME)
 
-        # 선택 확장용: trend 시트가 config에 있으면 생성, 없으면 None
-        self.trend_sheet = None
-        try:
-            from config import TREND_WORKSHEET_NAME
-            self.trend_sheet = self._get_or_create_worksheet(TREND_WORKSHEET_NAME)
-        except Exception:
-            self.trend_sheet = None
+        self._ensure_all_headers()
 
-        self._ensure_raw_sheet_header()
-        self._ensure_file_dedup_header()
-        self._ensure_trend_sheet_header(self.negative_sheet)
-        self._ensure_trend_sheet_header(self.positive_sheet)
-        self._ensure_trend_sheet_header(self.suggestion_sheet)
-
-        if self.trend_sheet is not None:
-            self._ensure_trend_sheet_header(self.trend_sheet)
-
+    # =========================================================
+    # Worksheet 준비
+    # =========================================================
     def _get_or_create_worksheet(self, title: str, rows: int = 1000, cols: int = 20):
         try:
-            return self.sh.worksheet(title)
+            ws = self.sh.worksheet(title)
+            return ws
         except gspread.WorksheetNotFound:
+            log_debug(f"[INFO] 워크시트 생성: {title}")
             return self.sh.add_worksheet(title=title, rows=rows, cols=cols)
 
-    def _ensure_header(self, worksheet, headers):
+    def _ensure_all_headers(self) -> None:
+        self._ensure_header(self.raw_sheet, RAW_CHAT_HEADERS)
+        self._ensure_header(self.file_dedup_sheet, FILE_DEDUP_HEADERS)
+        self._ensure_header(self.negative_sheet, TREND_HEADERS)
+        self._ensure_header(self.positive_sheet, TREND_HEADERS)
+        self._ensure_header(self.suggestions_sheet, TREND_HEADERS)
+        self._ensure_header(self.trend_sheet, TREND_HEADERS)
+
+    def _ensure_header(self, worksheet, headers: List[str]) -> None:
         if not WRITE_HEADER_IF_EMPTY:
             return
 
-        values = worksheet.get_all_values()
-        if not values:
-            worksheet.append_row(headers, value_input_option="USER_ENTERED")
+        first_row = worksheet.row_values(1)
+        if first_row:
             return
 
-        first_row = values[0]
-        if not first_row:
-            worksheet.update("A1", [headers])
+        worksheet.append_row(headers, value_input_option="RAW")
+        log_debug(f"[INFO] 헤더 입력 완료: {worksheet.title}")
 
-    def _ensure_raw_sheet_header(self):
-        self._ensure_header(self.raw_sheet, RAW_CHAT_HEADERS)
+    # =========================================================
+    # 공통 유틸
+    # =========================================================
+    def _worksheet_by_key(self, key: str):
+        normalized = str(key).strip().lower()
 
-    def _ensure_file_dedup_header(self):
-        self._ensure_header(self.file_dedup_sheet, ["file_key", "file_name"])
-
-    def _ensure_trend_sheet_header(self, worksheet):
-        self._ensure_header(worksheet, TREND_HEADERS)
-
-    def get_existing_row_hashes(self):
-        if not ROW_DEDUP_ENABLED:
-            return set()
-
-        values = self.raw_sheet.get_all_values()
-        if len(values) <= 1:
-            return set()
-
-        header = values[0]
-        try:
-            row_hash_idx = header.index("row_hash")
-        except ValueError:
-            return set()
-
-        result = set()
-        for row in values[1:]:
-            if len(row) > row_hash_idx and str(row[row_hash_idx]).strip():
-                result.add(str(row[row_hash_idx]).strip())
-        return result
-
-    def get_processed_file_keys(self):
-        values = self.file_dedup_sheet.get_all_values()
-        if len(values) <= 1:
-            return set()
-
-        header = values[0]
-        file_key_idx = 0
-        try:
-            file_key_idx = header.index("file_key")
-        except ValueError:
-            file_key_idx = 0
-
-        result = set()
-        for row in values[1:]:
-            if len(row) > file_key_idx and str(row[file_key_idx]).strip():
-                result.add(str(row[file_key_idx]).strip())
-        return result
-
-    def mark_file_processed(self, file_key: str, file_name: str):
-        self.file_dedup_sheet.append_row(
-            [file_key, file_name],
-            value_input_option="USER_ENTERED",
-        )
-
-    def append_processed_file_keys(self, rows):
-        """
-        rows 예시:
-        [
-            [file_key, file_name],
-            [file_key, file_name],
-        ]
-        """
-        if not rows:
-            return
-        self.file_dedup_sheet.append_rows(rows, value_input_option="USER_ENTERED")
-
-    def append_raw_rows(self, rows):
-        """
-        rows가 dict 리스트여도 되고, 이미 정규화된 list 리스트여도 되게 처리.
-        dict 예시:
-        {
-            "datetime": "...",
-            "user": "...",
-            "message": "...",
-            "row_hash": "...",
-            "source_file": "..."
+        mapping = {
+            "raw_chat": self.raw_sheet,
+            WORKSHEET_NAME.strip().lower(): self.raw_sheet,
+            "file_dedup": self.file_dedup_sheet,
+            FILE_DEDUP_WORKSHEET_NAME.strip().lower(): self.file_dedup_sheet,
+            "negative": self.negative_sheet,
+            "negative_trend": self.negative_sheet,
+            NEGATIVE_TREND_WORKSHEET_NAME.strip().lower(): self.negative_sheet,
+            "positive": self.positive_sheet,
+            "positive_trend": self.positive_sheet,
+            POSITIVE_TREND_WORKSHEET_NAME.strip().lower(): self.positive_sheet,
+            "suggestion": self.suggestions_sheet,
+            "suggestions": self.suggestions_sheet,
+            SUGGESTIONS_WORKSHEET_NAME.strip().lower(): self.suggestions_sheet,
+            "trend": self.trend_sheet,
+            "discord_trend": self.trend_sheet,
+            TREND_WORKSHEET_NAME.strip().lower(): self.trend_sheet,
         }
 
-        또는
-        {
-            "date": "...",
-            "time": "...",
-            "user": "...",
-            "message": "...",
-            "source_file_name": "...",
-            "row_hash": "..."
-        }
-        """
-        if not rows:
-            return
+        ws = mapping.get(normalized)
+        if ws is None:
+            raise ValueError(f"알 수 없는 worksheet key: {key}")
+        return ws
 
-        normalized_rows = []
+    def _headers_by_worksheet(self, worksheet) -> List[str]:
+        first_row = worksheet.row_values(1)
+        if first_row:
+            return first_row
 
+        if worksheet.title == self.raw_sheet.title:
+            return RAW_CHAT_HEADERS
+        if worksheet.title == self.file_dedup_sheet.title:
+            return FILE_DEDUP_HEADERS
+        return TREND_HEADERS
+
+    def _rows_to_values(self, rows: List[Dict[str, Any]], headers: List[str]) -> List[List[Any]]:
+        values: List[List[Any]] = []
         for row in rows:
-            if isinstance(row, dict):
-                # 기존 포맷(datetime 기반)
-                if "datetime" in row:
-                    normalized_rows.append([
-                        row.get("datetime", ""),
-                        row.get("user", ""),
-                        row.get("message", ""),
-                        row.get("row_hash", ""),
-                        row.get("source_file", ""),
-                    ])
-                else:
-                    # 확장 포맷(date/time 분리 기반)
-                    normalized_rows.append([
-                        row.get("date", ""),
-                        row.get("time", ""),
-                        row.get("user", ""),
-                        row.get("message", ""),
-                        row.get("source_file_name", ""),
-                        row.get("row_hash", ""),
-                    ])
-            else:
-                # 이미 list 형태면 그대로 사용
-                normalized_rows.append(row)
+            values.append([row.get(header, "") for header in headers])
+        return values
 
-        self.raw_sheet.append_rows(normalized_rows, value_input_option="USER_ENTERED")
-
-    def append_negative_rows(self, rows):
-        if rows:
-            self.negative_sheet.append_rows(rows, value_input_option="USER_ENTERED")
-
-    def append_positive_rows(self, rows):
-        if rows:
-            self.positive_sheet.append_rows(rows, value_input_option="USER_ENTERED")
-
-    def append_suggestion_rows(self, rows):
-        if rows:
-            self.suggestion_sheet.append_rows(rows, value_input_option="USER_ENTERED")
-
-    def append_trend_rows(self, rows):
+    def _append_dict_rows(self, worksheet, rows: List[Dict[str, Any]], headers: List[str]) -> None:
         if not rows:
             return
 
-        if self.trend_sheet is None:
-            raise RuntimeError(
-                "TREND_WORKSHEET_NAME 이 config.py에 정의되지 않았습니다. "
-                "디스코드 동향 시트를 쓰려면 config에 TREND_WORKSHEET_NAME을 추가하세요."
-            )
+        values = self._rows_to_values(rows, headers)
+        self._append_values_with_retry(worksheet, values)
 
-        self.trend_sheet.append_rows(rows, value_input_option="USER_ENTERED")
-
-    def append_classified_rows(self, sheet_name: str, rows):
-        """
-        sheet_name 기준으로 적절한 시트에 append.
-        main.py에서 공통 라우팅할 때 사용.
-        """
-        if not rows:
+    def _append_values_with_retry(self, worksheet, values: List[List[Any]], max_retries: int = 3) -> None:
+        if not values:
             return
 
-        name_map = {
-            NEGATIVE_TREND_WORKSHEET_NAME: self.negative_sheet,
-            POSITIVE_TREND_WORKSHEET_NAME: self.positive_sheet,
-            SUGGESTIONS_WORKSHEET_NAME: self.suggestion_sheet,
-        }
-
-        if self.trend_sheet is not None:
+        last_error = None
+        for attempt in range(1, max_retries + 1):
             try:
-                from config import TREND_WORKSHEET_NAME
-                name_map[TREND_WORKSHEET_NAME] = self.trend_sheet
-            except Exception:
-                pass
+                worksheet.append_rows(values, value_input_option="RAW")
+                return
+            except Exception as e:
+                last_error = e
+                log_debug(
+                    f"[WARN] append_rows 실패 ({worksheet.title}) "
+                    f"{attempt}/{max_retries}: {e}"
+                )
+                time.sleep(1.0 * attempt)
 
-        if sheet_name not in name_map:
-            raise ValueError(f"알 수 없는 시트명: {sheet_name}")
+        raise RuntimeError(f"{worksheet.title} 시트 append 실패: {last_error}")
 
-        name_map[sheet_name].append_rows(rows, value_input_option="USER_ENTERED")
+    # =========================================================
+    # 조회
+    # =========================================================
+    def get_existing_row_hashes(self) -> Set[str]:
+        headers = self._headers_by_worksheet(self.raw_sheet)
+        if "row_hash" not in headers:
+            return set()
+
+        col_idx = headers.index("row_hash") + 1
+        values = self.raw_sheet.col_values(col_idx)
+
+        # 첫 줄은 header
+        result = {
+            str(v).strip()
+            for v in values[1:]
+            if str(v).strip()
+        }
+        log_debug(f"[INFO] 기존 row_hash 조회 완료: {len(result)}건")
+        return result
+
+    def load_existing_row_hashes(self) -> Set[str]:
+        return self.get_existing_row_hashes()
+
+    def read_existing_row_hashes(self) -> Set[str]:
+        return self.get_existing_row_hashes()
+
+    def get_processed_file_keys(self) -> Set[str]:
+        headers = self._headers_by_worksheet(self.file_dedup_sheet)
+        if "file_key" not in headers:
+            return set()
+
+        col_idx = headers.index("file_key") + 1
+        values = self.file_dedup_sheet.col_values(col_idx)
+
+        result = {
+            str(v).strip()
+            for v in values[1:]
+            if str(v).strip()
+        }
+        log_debug(f"[INFO] 기존 file_key 조회 완료: {len(result)}건")
+        return result
+
+    def load_processed_file_keys(self) -> Set[str]:
+        return self.get_processed_file_keys()
+
+    def read_processed_file_keys(self) -> Set[str]:
+        return self.get_processed_file_keys()
+
+    # =========================================================
+    # raw_chat 저장
+    # =========================================================
+    def append_raw_chat_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self._append_dict_rows(self.raw_sheet, rows, RAW_CHAT_HEADERS)
+
+    def save_raw_chat_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_raw_chat_rows(rows)
+
+    def add_raw_chat_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_raw_chat_rows(rows)
+
+    def insert_raw_chat_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_raw_chat_rows(rows)
+
+    # =========================================================
+    # file_dedup 저장
+    # =========================================================
+    def append_processed_files(self, rows: List[Dict[str, Any]]) -> None:
+        self._append_dict_rows(self.file_dedup_sheet, rows, FILE_DEDUP_HEADERS)
+
+    def save_processed_files(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_processed_files(rows)
+
+    def save_file_dedup_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_processed_files(rows)
+
+    def append_file_dedup_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_processed_files(rows)
+
+    # =========================================================
+    # 분류 시트 저장
+    # =========================================================
+    def append_negative_trend_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self._append_dict_rows(self.negative_sheet, rows, TREND_HEADERS)
+
+    def save_negative_trend_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_negative_trend_rows(rows)
+
+    def save_negative_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_negative_trend_rows(rows)
+
+    def append_positive_trend_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self._append_dict_rows(self.positive_sheet, rows, TREND_HEADERS)
+
+    def save_positive_trend_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_positive_trend_rows(rows)
+
+    def save_positive_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_positive_trend_rows(rows)
+
+    def append_suggestion_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self._append_dict_rows(self.suggestions_sheet, rows, TREND_HEADERS)
+
+    def save_suggestion_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_suggestion_rows(rows)
+
+    def save_suggestions_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_suggestion_rows(rows)
+
+    def append_trend_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self._append_dict_rows(self.trend_sheet, rows, TREND_HEADERS)
+
+    def save_trend_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_trend_rows(rows)
+
+    def save_discord_trend_rows(self, rows: List[Dict[str, Any]]) -> None:
+        self.append_trend_rows(rows)
+
+    # =========================================================
+    # generic fallback
+    # =========================================================
+    def save_rows_to_worksheet(self, worksheet_key: str, rows: List[Dict[str, Any]]) -> None:
+        worksheet = self._worksheet_by_key(worksheet_key)
+        headers = self._headers_by_worksheet(worksheet)
+        self._append_dict_rows(worksheet, rows, headers)
+
+    def append_rows_to_worksheet(self, worksheet_key: str, rows: List[Dict[str, Any]]) -> None:
+        self.save_rows_to_worksheet(worksheet_key, rows)
