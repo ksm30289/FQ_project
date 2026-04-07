@@ -69,9 +69,11 @@ def parse_chat_text(text: str):
     반환 형식:
     [
         {
-            "datetime": "2026-04-06 20:29:00",
+            "datetime": "2026-04-07 13:20:00",
             "user": "닉네임",
-            "message": "내용",
+            "message": "채팅 내용",
+            "row_hash": "..."
+            "source_file": "파일명.txt"
         },
         ...
     ]
