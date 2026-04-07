@@ -44,17 +44,30 @@ def _get_float_env(name: str, default: float) -> float:
         raise RuntimeError(f"실수 환경변수 형식 오류: {name}={value}")
 
 
+def _get_list_env(name: str, default: list[str]) -> list[str]:
+    value = os.getenv(name)
+    if value is None or str(value).strip() == "":
+        return default
+
+    raw = str(value).strip()
+
+    if raw.startswith("[") and raw.endswith("]"):
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, list):
+                return [str(x).strip() for x in parsed if str(x).strip()]
+        except json.JSONDecodeError:
+            pass
+
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 def get_google_credentials_dict() -> Dict[str, Any]:
-    """
-    GOOGLE_CREDENTIALS 환경변수에 서비스 계정 JSON 전체를 문자열로 넣는 방식.
-    Railway에 보통 1줄 JSON 문자열로 넣으면 됨.
-    """
     raw = _required_env("GOOGLE_CREDENTIALS")
 
     try:
         creds = json.loads(raw)
     except json.JSONDecodeError:
-        # 혹시 줄바꿈 escape 문제로 private_key가 깨졌을 때 보정 시도
         repaired = raw.replace("\\n", "\n")
         try:
             creds = json.loads(repaired)
@@ -77,7 +90,6 @@ def get_google_credentials_dict() -> Dict[str, Any]:
     if missing:
         raise RuntimeError(f"GOOGLE_CREDENTIALS 필수 키 누락: {missing}")
 
-    # private_key 줄바꿈 보정
     creds["private_key"] = str(creds["private_key"]).replace("\\n", "\n")
     return creds
 
@@ -96,6 +108,13 @@ SUGGESTIONS_WORKSHEET_NAME = _get_env("SUGGESTIONS_WORKSHEET_NAME", "건의")
 TREND_WORKSHEET_NAME = _get_env("TREND_WORKSHEET_NAME", "디스코드 동향")
 
 WRITE_HEADER_IF_EMPTY = _get_bool_env("WRITE_HEADER_IF_EMPTY", True)
+
+
+# =========================
+# 파서 옵션
+# =========================
+IGNORE_SYSTEM_MESSAGES = _get_bool_env("IGNORE_SYSTEM_MESSAGES", True)
+EXCLUDED_USERNAMES = _get_list_env("EXCLUDED_USERNAMES", ["오픈채팅봇"])
 
 
 # =========================
@@ -120,8 +139,6 @@ AI_MAX_RETRIES = _get_int_env("AI_MAX_RETRIES", 3)
 AI_RETRY_SLEEP_SEC = _get_float_env("AI_RETRY_SLEEP_SEC", 1.2)
 
 OPENAI_MODEL = _get_env("OPENAI_MODEL", "gpt-4o-mini")
-
-# ✅ 병렬 처리 옵션 (추가된 부분)
 AI_REVIEW_WORKERS = _get_int_env("AI_REVIEW_WORKERS", 8)
 AI_REVIEW_PARALLEL_ENABLED = _get_bool_env("AI_REVIEW_PARALLEL_ENABLED", True)
 
