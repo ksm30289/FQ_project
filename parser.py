@@ -1,239 +1,124 @@
-import hashlib
 import re
 from datetime import datetime
-from pathlib import Path
-from typing import Dict, List, Optional
 
-from config import DEFAULT_ROOM_NAME, IGNORE_SYSTEM_MESSAGES
+# 카카오톡 기본 메시지 시작 패턴 예시:
+# 2026. 4. 6. 오후 8:29, 닉네임 : 메시지
+#
+# 핵심:
+# - 메시지 시작 줄만 빠르게 판별
+# - 멀티라인 메시지는 이전 메시지에 이어붙임
+# - 불필요한 datetime 변환 최소화
 
-# 일반 메시지
-# 예:
-# 2026. 3. 24. 오전 8:39, 2서버/도우기 : 로얄길드 부길마 이신가요?
-MESSAGE_PATTERN = re.compile(
-    r"""^
-    (?P<year>\d{4})\.\s*
-    (?P<month>\d{1,2})\.\s*
-    (?P<day>\d{1,2})\.\s*
-    (?P<ampm>오전|오후)\s*
-    (?P<hour>\d{1,2}):(?P<minute>\d{2}),
-    \s*(?P<user>.+?)\s*:\s*(?P<message>.*)
-    $""",
-    re.VERBOSE,
+MESSAGE_START_RE = re.compile(
+    r"^(\d{4}\.\s*\d{1,2}\.\s*\d{1,2}\.\s*(오전|오후)\s*\d{1,2}:\d{2}),\s*(.*?)\s*:\s*(.*)$"
 )
 
-# 시스템 메시지
-# 예:
-# 2026. 3. 23. 오후 8:36: 2서버/고장난컴퓨터님이 들어왔습니다.
-# 2026. 4. 6. 오전 12:07: 관리자가 메시지를 가렸습니다.
-SYSTEM_PATTERN = re.compile(
-    r"""^
-    (?P<year>\d{4})\.\s*
-    (?P<month>\d{1,2})\.\s*
-    (?P<day>\d{1,2})\.\s*
-    (?P<ampm>오전|오후)\s*
-    (?P<hour>\d{1,2}):(?P<minute>\d{2})
-    :\s*(?P<message>.*)
-    $""",
-    re.VERBOSE,
+SYSTEM_KEYWORDS = (
+    "님이 들어왔습니다.",
+    "님이 나갔습니다.",
+    "님을 내보냈습니다.",
+    "방장이",
+    "운영정책을",
+    "채팅방 이름을",
+    "사진을 변경했습니다.",
+    "파일:",
+    "삭제된 메시지입니다.",
 )
 
-# 날짜 헤더
-# 예: 2026년 3월 23일 월요일
-DATE_HEADER_PATTERN = re.compile(
-    r"^\d{4}년\s*\d{1,2}월\s*\d{1,2}일\s*\S+$"
-)
-
-# 파일 메타 줄
-# 예:
-# Talk_2026.4.6 10:48-1.txt
-# 저장한 날짜 : 2026. 4. 6. 오전 11:31
-SAVED_AT_PATTERN = re.compile(r"^저장한 날짜\s*:\s*.+$")
-EXPORT_FILENAME_PATTERN = re.compile(r"^Talk_.+\.txt$")
+EXCLUDED_USERNAMES = {"오픈채팅봇"}
 
 
-def parse_kakao_datetime(
-    year: str,
-    month: str,
-    day: str,
-    ampm: str,
-    hour: str,
-    minute: str,
-) -> datetime:
-    y = int(year)
-    m = int(month)
-    d = int(day)
-    h = int(hour)
-    mm = int(minute)
+def normalize_datetime(dt_str: str) -> str:
+    """
+    카톡 날짜 문자열 -> YYYY-MM-DD HH:MM:SS
+    예: 2026. 4. 6. 오후 8:29
+    """
+    try:
+        # 빠른 파싱용 전처리
+        s = dt_str.replace("  ", " ").strip()
+        date_part, time_part = s.rsplit(" ", 2)[0], " ".join(s.rsplit(" ", 2)[1:])
 
-    if ampm == "오전":
-        if h == 12:
-            h = 0
-    elif ampm == "오후":
-        if h != 12:
-            h += 12
+        # 직접 분해
+        # ex) '2026. 4. 6.' + '오후 8:29'
+        parts = s.split()
+        year = int(parts[0].replace(".", ""))
+        month = int(parts[1].replace(".", ""))
+        day = int(parts[2].replace(".", ""))
+        ampm = parts[3]
+        hh, mm = parts[4].split(":")
+        hh = int(hh)
+        mm = int(mm)
 
-    return datetime(y, m, d, h, mm)
+        if ampm == "오후" and hh != 12:
+            hh += 12
+        elif ampm == "오전" and hh == 12:
+            hh = 0
 
-
-def infer_room_name(file_path: Path) -> str:
-    return file_path.stem or DEFAULT_ROOM_NAME
-
-
-def is_metadata_line(line: str) -> bool:
-    stripped = line.strip()
-    if not stripped:
-        return True
-    if DATE_HEADER_PATTERN.match(stripped):
-        return True
-    if SAVED_AT_PATTERN.match(stripped):
-        return True
-    if EXPORT_FILENAME_PATTERN.match(stripped):
-        return True
-    return False
+        dt = datetime(year, month, day, hh, mm)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return dt_str
 
 
-def build_message_row(
-    room_name: str,
-    source_file: str,
-    dt: datetime,
-    user_name: str,
-    message: str,
-    raw_line: str,
-) -> Dict:
-    clean_user_name = user_name.strip()
-    clean_message = message.strip()
-
-    base = f"{dt.strftime('%Y-%m-%d %H:%M:%S')}|{clean_user_name}|{clean_message}"
-    row_hash = hashlib.sha1(base.encode("utf-8")).hexdigest()
-
-    return {
-        "room_name": room_name,
-        "source_file": source_file,
-        "datetime": dt.strftime("%Y-%m-%d %H:%M:%S"),
-        "date": dt.strftime("%Y-%m-%d"),
-        "time": dt.strftime("%H:%M:%S"),
-        "user_name": clean_user_name,
-        "message": clean_message,
-        "row_hash": row_hash,
-        "raw_line": raw_line,
-        "is_system": False,
-    }
+def is_system_message(message: str) -> bool:
+    return any(k in message for k in SYSTEM_KEYWORDS)
 
 
-def build_system_row(
-    room_name: str,
-    source_file: str,
-    dt: datetime,
-    message: str,
-    raw_line: str,
-) -> Dict:
-    clean_message = message.strip()
+def parse_chat_text(text: str):
+    """
+    반환 형식:
+    [
+        {
+            "datetime": "2026-04-06 20:29:00",
+            "user": "닉네임",
+            "message": "내용",
+        },
+        ...
+    ]
+    """
 
-    base = f"{dt.strftime('%Y-%m-%d %H:%M:%S')}|SYSTEM|{clean_message}"
-    row_hash = hashlib.sha1(base.encode("utf-8")).hexdigest()
+    rows = []
+    current = None
 
-    return {
-        "room_name": room_name,
-        "source_file": source_file,
-        "datetime": dt.strftime("%Y-%m-%d %H:%M:%S"),
-        "date": dt.strftime("%Y-%m-%d"),
-        "time": dt.strftime("%H:%M:%S"),
-        "user_name": "SYSTEM",
-        "message": clean_message,
-        "row_hash": row_hash,
-        "raw_line": raw_line,
-        "is_system": True,
-    }
-
-
-def parse_chat_text(
-    text: str,
-    source_file: str,
-    room_name: Optional[str] = None,
-) -> List[Dict]:
-    room = room_name or DEFAULT_ROOM_NAME
-    rows: List[Dict] = []
-    current: Optional[Dict] = None
-
+    # splitlines()가 일반 split("\n")보다 안전
     for raw_line in text.splitlines():
-        line = raw_line.rstrip("\n")
-        stripped = line.strip()
+        line = raw_line.strip()
 
-        if is_metadata_line(stripped):
+        if not line:
             continue
 
-        msg_match = MESSAGE_PATTERN.match(stripped)
-        if msg_match:
-            # 기존 메시지 flush
-            if current is not None:
-                if not (IGNORE_SYSTEM_MESSAGES and current.get("is_system")):
+        m = MESSAGE_START_RE.match(line)
+        if m:
+            # 이전 메시지 저장
+            if current:
+                if (
+                    current["user"] not in EXCLUDED_USERNAMES
+                    and current["message"]
+                    and not is_system_message(current["message"])
+                ):
                     rows.append(current)
 
-            dt = parse_kakao_datetime(
-                msg_match.group("year"),
-                msg_match.group("month"),
-                msg_match.group("day"),
-                msg_match.group("ampm"),
-                msg_match.group("hour"),
-                msg_match.group("minute"),
-            )
+            dt_raw, _, user, message = m.groups()
+            current = {
+                "datetime": normalize_datetime(dt_raw),
+                "user": user.strip(),
+                "message": message.strip(),
+            }
+        else:
+            # 멀티라인 메시지 이어붙이기
+            if current:
+                if current["message"]:
+                    current["message"] += "\n" + line
+                else:
+                    current["message"] = line
 
-            user_name = msg_match.group("user").strip()
-
-            # 오픈채팅봇 제외
-            if "오픈채팅봇" in user_name:
-                current = None
-                continue
-
-            current = build_message_row(
-                room_name=room,
-                source_file=source_file,
-                dt=dt,
-                user_name=user_name,
-                message=msg_match.group("message"),
-                raw_line=stripped,
-            )
-            continue
-
-        sys_match = SYSTEM_PATTERN.match(stripped)
-        if sys_match:
-            if current is not None:
-                if not (IGNORE_SYSTEM_MESSAGES and current.get("is_system")):
-                    rows.append(current)
-
-            dt = parse_kakao_datetime(
-                sys_match.group("year"),
-                sys_match.group("month"),
-                sys_match.group("day"),
-                sys_match.group("ampm"),
-                sys_match.group("hour"),
-                sys_match.group("minute"),
-            )
-
-            current = build_system_row(
-                room_name=room,
-                source_file=source_file,
-                dt=dt,
-                message=sys_match.group("message"),
-                raw_line=stripped,
-            )
-            continue
-
-        # 멀티라인 메시지 처리
-        if current is not None and stripped:
-            current["message"] += "\n" + stripped
-
-    if current is not None:
-        if not (IGNORE_SYSTEM_MESSAGES and current.get("is_system")):
+    # 마지막 메시지 저장
+    if current:
+        if (
+            current["user"] not in EXCLUDED_USERNAMES
+            and current["message"]
+            and not is_system_message(current["message"])
+        ):
             rows.append(current)
 
     return rows
-
-
-def parse_chat_file(file_path: Path, text: str) -> List[Dict]:
-    room_name = infer_room_name(file_path)
-    return parse_chat_text(
-        text=text,
-        source_file=file_path.name,
-        room_name=room_name,
-    )
