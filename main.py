@@ -94,6 +94,8 @@ def main():
                 sheet_client.append_processed_file_key(file_key)
                 processed_file_keys.add(file_key)
 
+            drive_client.move_file_to_processed(file_id)
+
             total_files += 1
             total_uploaded += len(upload_rows)
 
