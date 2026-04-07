@@ -9,11 +9,9 @@ from parser import parse_chat_text
 from sheets import GoogleSheetClient
 from utils import make_file_key
 
-
 def log_debug(message: str):
     if DEBUG_LOG:
         print(message)
-
 
 def main():
     print("=== 작업 시작 ===")
