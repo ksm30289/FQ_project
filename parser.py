@@ -100,7 +100,10 @@ def build_message_row(
     message: str,
     raw_line: str,
 ) -> Dict:
-    base = f"{dt.strftime('%Y-%m-%d %H:%M:%S')}|{user_name}|{message}|{source_file}"
+    clean_user_name = user_name.strip()
+    clean_message = message.strip()
+
+    base = f"{dt.strftime('%Y-%m-%d %H:%M:%S')}|{clean_user_name}|{clean_message}"
     row_hash = hashlib.sha1(base.encode("utf-8")).hexdigest()
 
     return {
@@ -109,9 +112,9 @@ def build_message_row(
         "datetime": dt.strftime("%Y-%m-%d %H:%M:%S"),
         "date": dt.strftime("%Y-%m-%d"),
         "time": dt.strftime("%H:%M:%S"),
-        "user_name": user_name.strip(),
-        "message": message.strip(),
-        "row_hash": row_hash,   # 👈 이거 추가
+        "user_name": clean_user_name,
+        "message": clean_message,
+        "row_hash": row_hash,
         "raw_line": raw_line,
         "is_system": False,
     }
@@ -124,7 +127,9 @@ def build_system_row(
     message: str,
     raw_line: str,
 ) -> Dict:
-    base = f"{dt.strftime('%Y-%m-%d %H:%M:%S')}|SYSTEM|{message}|{source_file}"
+    clean_message = message.strip()
+
+    base = f"{dt.strftime('%Y-%m-%d %H:%M:%S')}|SYSTEM|{clean_message}"
     row_hash = hashlib.sha1(base.encode("utf-8")).hexdigest()
 
     return {
@@ -134,8 +139,8 @@ def build_system_row(
         "date": dt.strftime("%Y-%m-%d"),
         "time": dt.strftime("%H:%M:%S"),
         "user_name": "SYSTEM",
-        "message": message.strip(),
-        "row_hash": row_hash,   # 👈 이거 추가
+        "message": clean_message,
+        "row_hash": row_hash,
         "raw_line": raw_line,
         "is_system": True,
     }
