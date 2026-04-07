@@ -5,12 +5,15 @@ from config import (
     SPREADSHEET_ID,
     WORKSHEET_NAME,
     FILE_DEDUP_WORKSHEET_NAME,
+    NEGATIVE_TREND_WORKSHEET_NAME,
+    POSITIVE_TREND_WORKSHEET_NAME,
+    SUGGESTIONS_WORKSHEET_NAME,
     WRITE_HEADER_IF_EMPTY,
     RAW_CHAT_HEADERS,
+    TREND_HEADERS,
     ROW_DEDUP_ENABLED,
     get_google_credentials_dict,
 )
-from utils import make_row_hash
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -30,8 +33,15 @@ class GoogleSheetClient:
         self.raw_sheet = self._get_or_create_worksheet(WORKSHEET_NAME)
         self.file_dedup_sheet = self._get_or_create_worksheet(FILE_DEDUP_WORKSHEET_NAME)
 
+        self.negative_sheet = self._get_or_create_worksheet(NEGATIVE_TREND_WORKSHEET_NAME)
+        self.positive_sheet = self._get_or_create_worksheet(POSITIVE_TREND_WORKSHEET_NAME)
+        self.suggestion_sheet = self._get_or_create_worksheet(SUGGESTIONS_WORKSHEET_NAME)
+
         self._ensure_raw_sheet_header()
         self._ensure_file_dedup_header()
+        self._ensure_trend_sheet_header(self.negative_sheet)
+        self._ensure_trend_sheet_header(self.positive_sheet)
+        self._ensure_trend_sheet_header(self.suggestion_sheet)
 
     def _get_or_create_worksheet(self, title: str, rows: int = 1000, cols: int = 20):
         try:
@@ -39,138 +49,89 @@ class GoogleSheetClient:
         except gspread.WorksheetNotFound:
             return self.sh.add_worksheet(title=title, rows=rows, cols=cols)
 
-    def _ensure_raw_sheet_header(self):
+    def _ensure_header(self, worksheet, headers):
         if not WRITE_HEADER_IF_EMPTY:
             return
 
-        values = self.raw_sheet.get_all_values()
+        values = worksheet.get_all_values()
         if not values:
-            self.raw_sheet.append_row(RAW_CHAT_HEADERS, value_input_option="USER_ENTERED")
+            worksheet.append_row(headers, value_input_option="USER_ENTERED")
             return
 
-        first_row = values[0] if values else []
+        first_row = values[0]
         if not first_row:
-            self.raw_sheet.update("A1:D1", [RAW_CHAT_HEADERS])
+            worksheet.update("A1", [headers])
+
+    def _ensure_raw_sheet_header(self):
+        self._ensure_header(self.raw_sheet, RAW_CHAT_HEADERS)
 
     def _ensure_file_dedup_header(self):
-        if not WRITE_HEADER_IF_EMPTY:
-            return
+        self._ensure_header(self.file_dedup_sheet, ["file_key", "file_name"])
 
-        values = self.file_dedup_sheet.get_all_values()
-        if not values:
-            self.file_dedup_sheet.append_row(["file_key"], value_input_option="USER_ENTERED")
-            return
+    def _ensure_trend_sheet_header(self, worksheet):
+        self._ensure_header(worksheet, TREND_HEADERS)
 
-        first_row = values[0] if values else []
-        if not first_row:
-            self.file_dedup_sheet.update("A1:A1", [["file_key"]])
-
-    def get_existing_row_hashes(self) -> set:
-        """
-        raw_chat의 row_hash 컬럼을 set으로 로드
-        """
+    def get_existing_row_hashes(self):
         if not ROW_DEDUP_ENABLED:
             return set()
 
         values = self.raw_sheet.get_all_values()
-        if not values or len(values) <= 1:
+        if len(values) <= 1:
             return set()
 
         header = values[0]
         try:
-            hash_idx = header.index("row_hash")
+            row_hash_idx = header.index("row_hash")
         except ValueError:
             return set()
 
         result = set()
         for row in values[1:]:
-            if len(row) > hash_idx and row[hash_idx]:
-                result.add(row[hash_idx])
-
+            if len(row) > row_hash_idx and row[row_hash_idx].strip():
+                result.add(row[row_hash_idx].strip())
         return result
 
-    def get_processed_file_keys(self) -> set:
+    def get_processed_file_keys(self):
         values = self.file_dedup_sheet.get_all_values()
-        if not values or len(values) <= 1:
-            return set()
-
-        header = values[0]
-        try:
-            idx = header.index("file_key")
-        except ValueError:
+        if len(values) <= 1:
             return set()
 
         result = set()
         for row in values[1:]:
-            if len(row) > idx and row[idx]:
-                result.add(row[idx])
-
+            if row and row[0].strip():
+                result.add(row[0].strip())
         return result
 
-    def append_raw_rows_batch(self, rows: list):
-        """
-        rows 형식:
-        [
-            [datetime, user, message, row_hash],
-            ...
-        ]
-        """
+    def mark_file_processed(self, file_key: str, file_name: str):
+        self.file_dedup_sheet.append_row(
+            [file_key, file_name],
+            value_input_option="USER_ENTERED",
+        )
+
+    def append_raw_rows(self, rows):
         if not rows:
             return
 
-        self.raw_sheet.append_rows(
-            rows,
-            value_input_option="USER_ENTERED",
-        )
-
-    def append_processed_file_key(self, file_key: str):
-        if not file_key:
-            return
-
-        self.file_dedup_sheet.append_row(
-            [file_key],
-            value_input_option="USER_ENTERED",
-        )
-
-    def build_raw_rows_for_upload(self, parsed_rows: list, existing_hashes: set):
-        """
-        parsed_rows:
-        [
-            {"datetime": "...", "user": "...", "message": "..."}
-        ]
-        """
-        upload_rows = []
-
-        for r in parsed_rows:
-            row_hash = make_row_hash(r["datetime"], r["user"], r["message"])
-
-            if ROW_DEDUP_ENABLED and row_hash in existing_hashes:
-                continue
-
-            upload_rows.append([
-                r["datetime"],
-                r["user"],
-                r["message"],
-                row_hash,
+        normalized_rows = []
+        for row in rows:
+            normalized_rows.append([
+                row.get("datetime", ""),
+                row.get("user", ""),
+                row.get("message", ""),
+                row.get("row_hash", ""),
+                row.get("source_file", ""),
             ])
 
-            if ROW_DEDUP_ENABLED:
-                existing_hashes.add(row_hash)
+        self.raw_sheet.append_rows(normalized_rows, value_input_option="USER_ENTERED")
 
-        return upload_rows
+    def append_negative_rows(self, rows):
+        if rows:
+            self.negative_sheet.append_rows(rows, value_input_option="USER_ENTERED")
 
-    # ✅ 추가된 범용 시트 append 함수
-    def append_to_sheet(self, sheet_name: str, rows: list):
-        """
-        아무 시트에나 데이터 추가할 때 사용하는 유틸 함수
-        (긍정/부정/건의 등 확장용)
-        """
-        if not rows:
-            return
+    def append_positive_rows(self, rows):
+        if rows:
+            self.positive_sheet.append_rows(rows, value_input_option="USER_ENTERED")
 
-        try:
-            ws = self.sh.worksheet(sheet_name)
-        except gspread.WorksheetNotFound:
-            ws = self.sh.add_worksheet(title=sheet_name, rows=1000, cols=10)
-
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
+    def append_suggestion_rows(self, rows):
+        if rows:
+            self.suggestion_sheet.append_rows(rows, value_input_option="USER_ENTERED")
