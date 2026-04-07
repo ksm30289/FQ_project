@@ -1,27 +1,12 @@
 import hashlib
-from typing import Iterable, List
 
 
-def make_sha256(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+def make_file_key(file_id: str, file_name: str, modified_time: str = "") -> str:
+    raw = f"{file_id}|{file_name}|{modified_time}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
-def make_row_hash(room_name: str, dt: str, user_name: str, message: str) -> str:
-    raw = "||".join([
-        (room_name or "").strip(),
-        (dt or "").strip(),
-        (user_name or "").strip(),
-        (message or "").strip(),
-    ])
-    return make_sha256(raw)
-
-
-def make_file_key(file_id: str, file_name: str, file_size: str, mode: str = "id") -> str:
-    if mode == "id":
-        return file_id
-    return make_sha256(f"{file_name}||{file_size}")
-
-
-def chunked(data: List, size: int) -> Iterable[List]:
-    for i in range(0, len(data), size):
-        yield data[i:i + size]
+def make_row_hash(dt: str, user: str, message: str) -> str:
+    # 긴 메시지도 비교 빠르게 하려고 해시 사용
+    raw = f"{dt}|{user}|{message}"
+    return hashlib.md5(raw.encode("utf-8")).hexdigest()
