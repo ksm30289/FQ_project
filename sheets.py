@@ -1,133 +1,108 @@
-# sheets.py
+import os
+import json
 import gspread
 from google.oauth2.service_account import Credentials
 
-from config import get_google_credentials_dict, SPREADSHEET_ID
+from utils import make_row_hash
 
-RAW_CHAT_SHEET = "raw_chat"
-PROCESSED_FILES_SHEET = "_processed_files"
-
-RAW_HEADERS = [
-    "room_name",
-    "source_file",
-    "datetime",
-    "date",
-    "time",
-    "user_name",
-    "message",
-    "row_hash",
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
 ]
 
 
 class GoogleSheetClient:
     def __init__(self):
-        creds_dict = get_google_credentials_dict()
+        creds_info = json.loads(os.environ["GOOGLE_CREDENTIALS"])
+        creds = Credentials.from_service_account_info(creds_info, scopes=SCOPES)
+        self.gc = gspread.authorize(creds)
 
-        scopes = [
-            "https://www.googleapis.com/auth/spreadsheets",
-            "https://www.googleapis.com/auth/drive",
-        ]
+        self.spreadsheet_id = os.environ["SPREADSHEET_ID"]
+        self.sh = self.gc.open_by_key(self.spreadsheet_id)
 
-        creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
-        gc = gspread.authorize(creds)
+        self.raw_sheet = self.sh.worksheet("raw_chat")
+        self.meta_sheet = self.sh.worksheet("_meta")
 
-        # 이 호출 자체도 read 1회이므로, 앱 재시작/재실행 빈도를 낮추는 게 중요
-        self.spreadsheet = gc.open_by_key(SPREADSHEET_ID)
-
-    def get_or_create_worksheet(self, title: str, rows: int = 1000, cols: int = 20):
-        try:
-            return self.spreadsheet.worksheet(title)
-        except gspread.WorksheetNotFound:
-            return self.spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
-
-    def ensure_sheet(self, sheet_name: str, headers: list[str]):
+    def get_existing_row_hashes(self) -> set:
         """
-        읽기 최소화 버전:
-        - 시트 존재 여부만 확인
-        - 있으면 헤더 검사 안 함
-        - 없을 때만 생성 후 헤더 1회 입력
+        raw_chat의 마지막 열(row_hash)만 가져와서 set으로 만듦
+        전체 행을 다 가져오는 것보다 훨씬 빠름
         """
-        try:
-            self.spreadsheet.worksheet(sheet_name)
-        except gspread.WorksheetNotFound:
-            ws = self.spreadsheet.add_worksheet(
-                title=sheet_name,
-                rows=1000,
-                cols=max(len(headers), 10),
-            )
-            ws.append_row(headers, value_input_option="USER_ENTERED")
-
-    def append_rows(self, sheet_name: str, rows: list[list]):
-        if not rows:
-            return
-
-        ws = self.get_or_create_worksheet(sheet_name)
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
-
-    def get_existing_row_hashes(self, sheet_name: str = RAW_CHAT_SHEET) -> set[str]:
-        """
-        raw_chat의 row_hash를 읽어서 중복 업로드 방지.
-        주의: 이 함수는 전체 시트를 읽으므로 read quota를 사용한다.
-        """
-        ws = self.get_or_create_worksheet(sheet_name)
-        values = ws.get_all_values()
-
-        if not values or len(values) < 2:
+        values = self.raw_sheet.get_all_values()
+        if not values or len(values) <= 1:
             return set()
 
         header = values[0]
-        if "row_hash" not in header:
+        try:
+            hash_idx = header.index("row_hash")
+        except ValueError:
+            # row_hash 컬럼이 아직 없으면 전체 비어있다고 간주
             return set()
 
-        hash_idx = header.index("row_hash")
         result = set()
-
         for row in values[1:]:
-            if len(row) > hash_idx:
-                row_hash = row[hash_idx].strip()
-                if row_hash:
-                    result.add(row_hash)
-
+            if len(row) > hash_idx and row[hash_idx]:
+                result.add(row[hash_idx])
         return result
 
-    def get_processed_file_keys(self, sheet_name: str = PROCESSED_FILES_SHEET) -> set[str]:
-        """
-        이미 처리한 파일 키 목록을 읽어 중복 파일 처리 방지.
-        주의: 이 함수도 read quota를 사용한다.
-        """
-        ws = self.get_or_create_worksheet(sheet_name)
-        values = ws.get_all_values()
-
-        if not values:
+    def get_processed_file_keys(self) -> set:
+        values = self.meta_sheet.get_all_values()
+        if not values or len(values) <= 1:
             return set()
 
-        if values[0] and values[0][0] == "file_key":
-            data_rows = values[1:]
-        else:
-            data_rows = values
+        header = values[0]
+        try:
+            idx = header.index("file_key")
+        except ValueError:
+            return set()
 
         result = set()
-        for row in data_rows:
-            if row and row[0].strip():
-                result.add(row[0].strip())
-
+        for row in values[1:]:
+            if len(row) > idx and row[idx]:
+                result.add(row[idx])
         return result
 
-    def append_processed_file_keys(
-        self,
-        file_keys: list[str],
-        sheet_name: str = PROCESSED_FILES_SHEET,
-    ):
-        if not file_keys:
+    def append_raw_rows_batch(self, rows: list):
+        """
+        rows 형식:
+        [
+            [datetime, user, message, row_hash],
+            ...
+        ]
+        """
+        if not rows:
             return
 
-        ws = self.get_or_create_worksheet(sheet_name)
-        values = ws.get_all_values()
+        self.raw_sheet.append_rows(
+            rows,
+            value_input_option="USER_ENTERED",
+        )
 
-        if not values:
-            ws.append_row(["file_key"], value_input_option="USER_ENTERED")
-        elif values[0] and values[0][0] != "file_key":
-            ws.insert_row(["file_key"], 1)
+    def append_processed_file_key(self, file_key: str):
+        if not file_key:
+            return
+        self.meta_sheet.append_row([file_key], value_input_option="USER_ENTERED")
 
-        rows = [[key] for key in file_keys]
-        ws.append_rows(rows, value_input_option="USER_ENTERED")
+    def build_raw_rows_for_upload(self, parsed_rows: list, existing_hashes: set):
+        """
+        parsed_rows:
+        [
+            {"datetime": "...", "user": "...", "message": "..."}
+        ]
+        """
+        upload_rows = []
+
+        for r in parsed_rows:
+            row_hash = make_row_hash(r["datetime"], r["user"], r["message"])
+            if row_hash in existing_hashes:
+                continue
+
+            upload_rows.append([
+                r["datetime"],
+                r["user"],
+                r["message"],
+                row_hash,
+            ])
+            existing_hashes.add(row_hash)
+
+        return upload_rows
