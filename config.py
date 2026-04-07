@@ -121,6 +121,10 @@ AI_RETRY_SLEEP_SEC = _get_float_env("AI_RETRY_SLEEP_SEC", 1.2)
 
 OPENAI_MODEL = _get_env("OPENAI_MODEL", "gpt-4o-mini")
 
+# ✅ 병렬 처리 옵션 (추가된 부분)
+AI_REVIEW_WORKERS = _get_int_env("AI_REVIEW_WORKERS", 8)
+AI_REVIEW_PARALLEL_ENABLED = _get_bool_env("AI_REVIEW_PARALLEL_ENABLED", True)
+
 
 # =========================
 # Header 정의
